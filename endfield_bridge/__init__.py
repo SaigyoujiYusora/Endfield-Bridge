@@ -58,6 +58,7 @@ def update_npr_post(self, context):
 
 
 class SORA_Settings(bpy.types.PropertyGroup):
+    face_filter: StringProperty(name="Face controls and presets")
     material_mode: EnumProperty(name="Import materials", items=[("RURI", "ENDF NPR-Shader", "ENDF NPR-Shader shader and vertex stages"), ("BASIC", "Basic PBR", "Principled material fallback")], default="RURI")
     npr_post_processing: BoolProperty(
         name="ENDF NPR-Shader post-processing", default=True, update=update_npr_post,
@@ -202,7 +203,8 @@ class SORA_PT_panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="Face Driver")
         obj = context.object
-        has_face_channels = False
+        from . import face_controls
+        has_face_channels = face_controls.draw(box, context)
         if obj is not None and obj.get("sora_instance"):
             for key in obj.keys():
                 if key.startswith("face_"):
@@ -228,9 +230,13 @@ def register():
     bpy.types.Scene.sora = bpy.props.PointerProperty(type=SORA_Settings)
     post.register()
     material_panel.register()
+    from . import face_controls
+    face_controls.register()
 
 
 def unregister():
+    from . import face_controls
+    face_controls.unregister()
     from . import post, ruri_adapter, material_panel
     material_panel.unregister()
     post.unregister()

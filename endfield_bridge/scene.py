@@ -169,6 +169,9 @@ def create_scene(context, document, material_mode=None):
                     obj["sora_face_" + property_name] = shape.name
             if material_mode in {"RURI", "NPR"}:
                 ruri_adapter.prepare_mesh(obj, source)
+        if rig is not None and document.get('faceDriver'):
+            from . import face_controls
+            face_controls.install(rig, document['faceDriver'], document['bones'])
         context.view_layer.update()
         if material_mode in {"RURI", "NPR"}:
             ruri_adapter.finish_import(context, [obj for obj in created if obj.type == "MESH"])

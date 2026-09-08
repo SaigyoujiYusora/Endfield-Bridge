@@ -12,6 +12,9 @@ import bpy
 _previous_timer = globals().get('_view_timer')
 if _previous_timer is not None and bpy.app.timers.is_registered(_previous_timer):
     bpy.app.timers.unregister(_previous_timer)
+from . import parameter_upload
+for _previous_stack in globals().get('_STACKS') or ():
+    parameter_upload.cancel(_previous_stack)
 for _handlers in (bpy.app.handlers.load_post, bpy.app.handlers.render_pre,
                   bpy.app.handlers.frame_change_post, bpy.app.handlers.depsgraph_update_post):
     for _handler in list(_handlers):
@@ -31,6 +34,9 @@ def stacks():
         runtime.LIGHT_TABLE = 'ENDF NPR-Shader Light Table'
         folder = str(Path(runtime.__file__).parent)
         class EndfStack(runtime.Stack):
+            def _param_flush_soon(self):
+                parameter_upload.schedule(self)
+
             def sync_outline_view(self, view=None, camera=None, objects=None, rebuild=True):
                 from .outline_sync import sync_outline_view
                 return sync_outline_view(self, view=view, camera=camera,
@@ -336,6 +342,14 @@ def render_view(scene, *_):
     for stack in stacks():
         if stack.post is None:
             stack.sync_outline_view(camera=scene.camera, rebuild=False)
+    flush_pending_tables(scene)
+
+
+def flush_pending_tables(scene):
+    """A render cannot wait for the interactive 0.1-second upload timer."""
+    used = {slot.material.get('ruri_uber_stack') for obj in scene.objects
+            for slot in obj.material_slots if slot.material is not None}
+    return parameter_upload.flush_pending(stacks(), used)
 
 
 @bpy.app.handlers.persistent
@@ -390,6 +404,8 @@ def register():
 
 
 def unregister():
+    for stack in _STACKS or ():
+        parameter_upload.cancel(stack)
     if restore in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(restore)
     if render_view in bpy.app.handlers.render_pre:
