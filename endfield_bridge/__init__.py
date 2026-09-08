@@ -5,10 +5,10 @@ bl_info = {
 }
 
 import bpy
-from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringProperty, EnumProperty
 
 from .client import CoreError, request
-from .scene import apply_clip, create_scene
+from .scene import apply_clip, create_scene, remove_scene
 
 
 class SORA_Preferences(bpy.types.AddonPreferences):
@@ -19,13 +19,50 @@ class SORA_Preferences(bpy.types.AddonPreferences):
         self.layout.prop(self, "executable")
 
 
+class SORA_OT_remove(bpy.types.Operator):
+    bl_idname = "sora.remove_import"
+    bl_label = "Remove selected import"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        obj = context.object
+        matches = [c for c in obj.users_collection if c.get("sora_instance") == obj.get("sora_instance")] if obj and obj.get("sora_instance") else []
+        if len(matches) != 1:
+            self.report({"ERROR"}, "Select an object in one imported collection")
+            return {"CANCELLED"}
+        try:
+            remove_scene(context, matches[0])
+            return {"FINISHED"}
+        except ValueError as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+
+
 class SORA_AssetRow(bpy.types.PropertyGroup):
     identity: StringProperty()
     detail: StringProperty()
     has_scene: BoolProperty(default=False)
 
 
+def update_npr_post(self, context):
+    from . import post
+    scene = self.id_data
+    try:
+        if self.npr_post_processing:
+            post.enable(scene, context)
+        else:
+            post.disable(scene)
+    except (ValueError, RuntimeError, TypeError, KeyError) as error:
+        self['npr_post_processing'] = post.installed(scene)
+        self.status = 'ENDF NPR-Shader post: ' + str(error)
+
+
 class SORA_Settings(bpy.types.PropertyGroup):
+    material_mode: EnumProperty(name="Import materials", items=[("RURI", "ENDF NPR-Shader", "ENDF NPR-Shader shader and vertex stages"), ("BASIC", "Basic PBR", "Principled material fallback")], default="RURI")
+    npr_post_processing: BoolProperty(
+        name="ENDF NPR-Shader post-processing", default=True, update=update_npr_post,
+        description="Apply game tone mapping to the entire scene after its existing compositor, including viewport and final render; uses Standard color management and neutral exposure/gamma, and restores previous settings when disabled")
+
     database: StringProperty(name="Sora Endfield Database", subtype="FILE_PATH")
     query: StringProperty(name="Search")
     result_database: StringProperty()
@@ -150,7 +187,17 @@ class SORA_PT_panel(bpy.types.Panel):
         layout.operator("sora.search")
         layout.template_list("UI_UL_list", "sora_assets", settings, "assets", settings, "selected", rows=4)
         layout.operator("sora.import_asset")
-        layout.label(text="Materials: Basic PBR")
+        layout.operator("sora.remove_import")
+        layout.prop(settings, "material_mode")
+        if settings.material_mode == "RURI":
+            layout.label(text="ENDF NPR-Shader: scene lights and world")
+        if settings.material_mode == "RURI" or context.scene.get('endf_npr_post_state'):
+            layout.prop(settings, "npr_post_processing")
+            layout.label(text="Post-processing affects the entire scene", icon="INFO")
+        if context.object and context.object.active_material:
+            material = context.object.active_material
+            if material.get("sora_npr_diagnostics"):
+                layout.label(text="Material limitations: Custom Properties", icon="INFO")
         layout.label(text=settings.status)
         box = layout.box()
         box.label(text="Face Driver")
@@ -170,16 +217,24 @@ class SORA_PT_panel(bpy.types.Panel):
         box.operator("screen.animation_play", text="Play / Pause", icon="PLAY")
 
 
-CLASSES = (SORA_Preferences, SORA_AssetRow, SORA_Settings, SORA_OT_check, SORA_OT_search, SORA_OT_import, SORA_OT_clip, SORA_PT_panel)
+CLASSES = (SORA_Preferences, SORA_AssetRow, SORA_Settings, SORA_OT_check, SORA_OT_search, SORA_OT_import, SORA_OT_remove, SORA_OT_clip, SORA_PT_panel)
 
 
 def register():
+    from . import post, ruri_adapter, material_panel
+    ruri_adapter.register()
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.sora = bpy.props.PointerProperty(type=SORA_Settings)
+    post.register()
+    material_panel.register()
 
 
 def unregister():
+    from . import post, ruri_adapter, material_panel
+    material_panel.unregister()
+    post.unregister()
+    ruri_adapter.unregister()
     del bpy.types.Scene.sora
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
