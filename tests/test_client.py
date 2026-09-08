@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -9,8 +10,8 @@ spec = importlib.util.spec_from_file_location("sora_client", Path(__file__).reso
 client = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(client)
 core = Path(__file__).resolve().parents[2] / "Sora-Core"
-executable = core / "src/Sora.Cli/bin/Release/net10.0/Sora-Core.exe"
-database = core / "artifacts/fixtures/fixture.sredb"
+executable = Path(os.environ.get('SORA_CORE_EXECUTABLE', core / "src/Sora.Cli/bin/Release/net10.0/Sora-Core.exe"))
+database = Path(os.environ.get('SORA_TEST_DATABASE', core / "artifacts/fixtures/fixture.sredb"))
 
 
 class ClientTests(unittest.TestCase):

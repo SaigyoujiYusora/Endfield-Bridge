@@ -162,7 +162,9 @@ class SORA_OT_clip(bpy.types.Operator):
             clip = next((clip for clip in document["clips"] if clip["name"] == context.scene.sora.clip), None)
             if clip is None:
                 raise ValueError("Animation name is not present in this asset")
-            apply_clip(context, rig, clip, [bone["name"] for bone in document["bones"]])
+            apply_clip(context, rig, clip, [bone["name"] for bone in document["bones"]],
+                       bone_sources=document['bones'] if all(b.get('sourcePath') is not None for b in document['bones']) else None,
+                       keep_face_controls=context.scene.sora_animation.keep_face_controls)
             return {"FINISHED"}
         except (CoreError, ValueError, KeyError, RuntimeError) as error:
             self.report({"ERROR"}, str(error))
@@ -214,6 +216,8 @@ class SORA_PT_panel(bpy.types.Panel):
             box.label(text="No face channels on this object")
         box = layout.box()
         box.label(text="Animation Player")
+        from . import animation_panel
+        animation_panel.draw(box, context)
         box.prop(settings, "clip")
         box.operator("sora.load_clip")
         box.operator("screen.animation_play", text="Play / Pause", icon="PLAY")
@@ -232,9 +236,13 @@ def register():
     material_panel.register()
     from . import face_controls
     face_controls.register()
+    from . import animation_panel
+    animation_panel.register()
 
 
 def unregister():
+    from . import animation_panel
+    animation_panel.unregister()
     from . import face_controls
     face_controls.unregister()
     from . import post, ruri_adapter, material_panel

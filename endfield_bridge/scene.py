@@ -87,6 +87,8 @@ def create_scene(context, document, material_mode=None):
             bpy.ops.object.mode_set(mode="OBJECT")
             for bone, source in zip(armature.bones, document["bones"]):
                 bone["sora_source_path"] = source.get("sourcePath") or ""
+                if source.get('sourceHash') is not None:
+                    bone['sora_source_hash'] = str(int(source['sourceHash']))
             if shader_frame:
                 rig.rotation_euler.z = math.pi
             rig.show_in_front = True
@@ -254,71 +256,6 @@ def remove_scene(context, collection):
     bpy.data.collections.remove(collection)
 
 
-def apply_clip(context, rig, clip, bone_names):
-    if context.mode not in {"OBJECT", "POSE"}:
-        raise ValueError("Switch to Object or Pose Mode before loading an animation")
-    if rig is None or rig.type != "ARMATURE" or not rig.get("sora_instance"):
-        raise ValueError("Select a Sora-Core imported armature")
-    for track in clip["tracks"]:
-        if bone_names[track["bone"]] not in rig.pose.bones:
-            raise ValueError("Animation skeleton does not match the imported armature")
-    previous_action = rig.animation_data.action if rig.animation_data else None
-    previous_slot = rig.animation_data.action_slot if rig.animation_data else None
-    had_animation_data = rig.animation_data is not None
-    timing = (context.scene.render.fps, context.scene.render.fps_base, context.scene.frame_start, context.scene.frame_end, context.scene.frame_current, context.scene.frame_subframe)
-    pose_state = [(bone, bone.rotation_mode, bone.matrix_basis.copy()) for bone in rig.pose.bones]
-    action = bpy.data.actions.new(clip["name"])
-    action["sora_instance"] = rig["sora_instance"]
-    try:
-        rig.animation_data_create()
-        rig.animation_data.action = action
-        for bone in rig.pose.bones:
-            bone.location = (0, 0, 0)
-            bone.scale = (1, 1, 1)
-            bone.rotation_euler = (0, 0, 0)
-            bone.rotation_quaternion = (1, 0, 0, 0)
-            bone.rotation_axis_angle = (0, 0, 1, 0)
-        for track in clip["tracks"]:
-            bone = rig.pose.bones[bone_names[track["bone"]]]
-            attribute = {"location": "location", "rotation": "rotation_quaternion", "scale": "scale"}[track["channel"]]
-            if track["channel"] == "rotation":
-                bone.rotation_mode = "QUATERNION"
-            previous_quaternion = None
-            for key in track["keys"]:
-                value = key["value"]
-                if track["channel"] == "rotation":
-                    value = [value[3], value[0], value[1], value[2]]
-                    if previous_quaternion is not None and sum(a * b for a, b in zip(value, previous_quaternion)) < 0:
-                        value = [-component for component in value]
-                    previous_quaternion = value
-                setattr(bone, attribute, value)
-                bone.keyframe_insert(data_path=attribute, frame=1 + key["time"] * clip["fps"], group=bone.name)
-        for layer in action.layers:
-            for strip in layer.strips:
-                for bag in strip.channelbags:
-                    for curve in bag.fcurves:
-                        for point in curve.keyframe_points:
-                            point.interpolation = "LINEAR"
-        action.use_fake_user = True
-        context.scene.render.fps = round(clip["fps"])
-        context.scene.render.fps_base = context.scene.render.fps / clip["fps"]
-        context.scene.frame_start = 1
-        context.scene.frame_end = max(1, math.ceil(clip["duration"] * clip["fps"]) + 1)
-        context.scene.frame_set(1)
-        if previous_action is not None:
-            previous_action.use_fake_user = True
-        return action
-    except Exception:
-        if had_animation_data:
-            rig.animation_data.action = previous_action
-            if previous_slot is not None:
-                rig.animation_data.action_slot = previous_slot
-        else:
-            rig.animation_data_clear()
-        bpy.data.actions.remove(action)
-        context.scene.render.fps, context.scene.render.fps_base, context.scene.frame_start, context.scene.frame_end = timing[:4]
-        context.scene.frame_set(timing[4], subframe=timing[5])
-        for bone, mode, matrix in pose_state:
-            bone.rotation_mode = mode
-            bone.matrix_basis = matrix
-        raise
+def apply_clip(context, rig, clip, bone_names, bone_sources=None, keep_face_controls=False):
+    from .animation_actions import apply_clip as build_action
+    return build_action(context, rig, clip, bone_names, bone_sources, keep_face_controls)

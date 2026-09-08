@@ -351,7 +351,8 @@ class SORA_OT_face_toggle(bpy.types.Operator):
         if rig is None:
             return {'CANCELLED'}
         try:
-            set_enabled(rig, not rig.get(ENABLED, False))
+            from .animation_actions import set_manual_face
+            set_manual_face(context, rig, not rig.get(ENABLED, False))
             return {'FINISHED'}
         except (ValueError, RuntimeError) as error:
             self.report({'ERROR'}, str(error))
