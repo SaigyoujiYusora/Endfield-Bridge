@@ -341,6 +341,15 @@ def set_manual_face(context, rig, enabled):
 
 
 def apply_clip(context, rig, clip, bone_names, bone_sources=None, keep_face_controls=False):
+    work = apply_clip_steps(context, rig, clip, bone_names, bone_sources, keep_face_controls)
+    while True:
+        try:
+            next(work)
+        except StopIteration as finished:
+            return finished.value
+
+
+def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_face_controls=False):
     if context.mode not in {'OBJECT', 'POSE'}:
         raise ValueError('Switch to Object or Pose Mode before loading an animation')
     if rig is None or rig.type != 'ARMATURE' or not rig.get('sora_instance'):
@@ -356,7 +365,9 @@ def apply_clip(context, rig, clip, bone_names, bone_sources=None, keep_face_cont
     prepared, destinations, overrides, rotation_bones = [], set(), [], set()
     scalar_registry = json.loads(rig.get('sora_anim_scalar_map', '{}'))
     scalar_properties = {}
-    for track in clip['tracks']:
+    for track_index, track in enumerate(clip['tracks']):
+        if track_index % 16 == 0:
+            yield {'stage': 'Preparing animation tracks', 'completed': track_index, 'total': len(clip['tracks'])}
         index = track['bone']
         if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(bones):
             raise ValueError('Animation bone index is out of range')
@@ -434,7 +445,9 @@ def apply_clip(context, rig, clip, bone_names, bone_sources=None, keep_face_cont
         bag = strip.channelbags.new(slot)
         interpolation = {}
         candidate_faces = []
-        for path, axis, group, frames, values, component, muted, face_record in prepared:
+        for curve_index, (path, axis, group, frames, values, component, muted, face_record) in enumerate(prepared):
+            if curve_index % 16 == 0:
+                yield {'stage': 'Creating animation curves', 'completed': curve_index, 'total': len(prepared)}
             curve = bag.fcurves.new(data_path=path, index=axis, group_name=group)
             count = len(frames)
             curve.keyframe_points.add(count)
@@ -449,6 +462,7 @@ def apply_clip(context, rig, clip, bone_names, bone_sources=None, keep_face_cont
                 candidate_faces.append(face_record)
                 if muted:
                     overrides.append(face_record)
+        yield {'stage': 'Binding animation and Face state'}
         action['sora_face_curves'] = json.dumps(candidate_faces, separators=(',', ':'))
         action['sora_face_override'] = json.dumps(overrides, separators=(',', ':'))
         action['sora_face_mode'] = 'MANUAL' if rig.get(face.ENABLED) else 'ANIMATION'
@@ -488,7 +502,7 @@ def apply_clip(context, rig, clip, bone_names, bone_sources=None, keep_face_cont
         context.scene.frame_end = max(1, math.ceil(duration*fps) + 1)
         _refresh_frame(context, rig, 1)
         return action
-    except Exception:
+    except BaseException:
         # Restore the previous mask before evaluating its Action again.
         _restore_face_mask(old_face_mask)
         _restore_properties(rig, previous_override)

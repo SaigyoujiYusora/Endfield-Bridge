@@ -47,13 +47,25 @@ def stacks():
                 # Invalidate before it can replace the shared table contents.
                 from . import runtime_sync
                 runtime_sync.reset()
-                return super().build_material(*args, **kwargs)
+                result = super().build_material(*args, **kwargs)
+                mat = args[0] if args else kwargs['mat']
+                if mat.get('endf_npr_transparent_base'):
+                    del mat['endf_npr_transparent_base']
+                return result
 
             def _wire_params(self, g, insts, part):
                 if bpy.context.scene.render.engine != 'CYCLES':
                     return super()._wire_params(g, insts, part)
                 from .cycles_uniforms import wire
                 return wire(self, g, insts, part)
+
+            def _transparent_base_output(self, mat, image, props):
+                super()._transparent_base_output(mat, image, props)
+                from .npc_customization import validate_transparent_graph
+                validate_transparent_graph(mat)
+                # provider() writes parameters before returning the material.
+                # Record the actual graph replacement before those callbacks.
+                mat['endf_npr_transparent_base'] = True
 
             def _param_write(self, mat):
                 column = super()._param_write(mat)
@@ -134,6 +146,17 @@ def unity_bone_name(armature, bone_name):
     return (bone.get('sora_source_path', '').rsplit('/', 1)[-1] or bone_name) if bone else ''
 
 
+def _discard_failed_materials(before_materials, before_groups):
+    """provider() can fail before returning its newly allocated datablock."""
+    for pending in list(bpy.data.materials):
+        if pending.as_pointer() not in before_materials and pending.users == 0:
+            bpy.data.materials.remove(pending)
+    for pending in list(bpy.data.node_groups):
+        if (pending.as_pointer() not in before_groups and pending.users == 0
+                and pending.get('endf_npc_customization')):
+            bpy.data.node_groups.remove(pending)
+
+
 def build_material(records, images, token):
     if len(records) != 1:
         raise ValueError('Each ENDF NPR-Shader material slot requires one record')
@@ -172,6 +195,8 @@ def build_material(records, images, token):
             base_id = props.textures[stack.ST_SLOT]
             builder._load_image = lambda identity: image_view if identity == base_id else images.get(identity)
         material = None
+        before_materials = {item.as_pointer() for item in bpy.data.materials}
+        before_groups = {item.as_pointer() for item in bpy.data.node_groups}
         try:
             material = stack.provider(builder, props)
             if material is None:
@@ -180,18 +205,19 @@ def build_material(records, images, token):
             material['sora_material_descriptor'] = json.dumps(descriptor)
             material['sora_render_pipeline'] = 'ENDF NPR-Shader'
             if transparent_base and original_base is not None:
-                kinds = {node.type for node in material.node_tree.nodes}
-                if 'GROUP' in kinds or not {'BSDF_TRANSPARENT', 'EMISSION', 'MIX_SHADER', 'TEX_IMAGE'}.issubset(kinds):
-                    raise RuntimeError('Unexpected ENDF NPR-Shader transparent BaseMap graph')
-                material['endf_npr_transparent_base'] = True
+                from .npc_customization import validate_transparent_graph
+                validate_transparent_graph(material)
+                if not material.get('endf_npr_transparent_base'):
+                    raise RuntimeError('ENDF NPR-Shader transparent graph lifecycle marker is missing')
             # Cached templates omit engine/world identity; replay the assembly
             # while preserving the deliberate flat transparent graph.
             rewire_material(stack, material)
             material['sora_ruri_engine'] = bpy.context.scene.render.engine
             return material
         except Exception:
-            if material is not None and material.users == 0:
-                bpy.data.materials.remove(material)
+            # Shared templates have fake users and survive. Existing unused
+            # user materials are protected by the pre-provider snapshot.
+            _discard_failed_materials(before_materials, before_groups)
             if image_view is not None and image_view.users == 0:
                 bpy.data.images.remove(image_view)
             raise
@@ -515,9 +541,8 @@ def audit_capability_links(material):
 
 def rewire_material(stack, material):
     if material.get('endf_npr_transparent_base'):
-        kinds = {node.type for node in material.node_tree.nodes}
-        if 'GROUP' in kinds or not {'BSDF_TRANSPARENT', 'EMISSION', 'MIX_SHADER', 'TEX_IMAGE'}.issubset(kinds):
-            raise RuntimeError('ENDF NPR-Shader transparent marker does not match its graph')
+        from .npc_customization import validate_transparent_graph
+        validate_transparent_graph(material)
         material['endf_npr_capability_signature'] = capability_signature(bpy.context.scene)
         return True
     part = material.get('ruri_uber_part')

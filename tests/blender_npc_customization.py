@@ -96,3 +96,65 @@ def run(document):
     report['checks'].append('unused import-owned private groups released')
     report['state'] = 'passed'
     return report
+
+
+def run_transparent(document):
+    """Exercise real transparent provider timing and failure cleanup with a DTO.
+
+    This complements run(document), which covers enabled opaque customization.
+    It does not prove UI import or visual correctness.
+    """
+    from copy import deepcopy
+    candidates = [record for record in document['materials']
+        if (record.get('npr') or {}).get('source', {}).get('shaderName') == 'HGRP/CharacterNPR'
+        and float((record.get('npr') or {}).get('floats', {}).get('_SurfaceType', 0)) >= 0.5
+        and float((record.get('npr') or {}).get('floats', {}).get(npc.ENABLE, 0)) <= 0.5
+        and not float((record.get('npr') or {}).get('floats', {}).get('_UseCharacterFur', 0))]
+    if not candidates:
+        raise ValueError('Scene DTO must contain a disabled-customization transparent Standard material')
+    token = 'transparent-customization-test-' + uuid.uuid4().hex
+    owned_images = []
+    report = {'sourceMaterial': candidates[0]['name'], 'checks': []}
+    try:
+        images = load_images(document.get('textures') or [], token, owned_images,
+                             document.get('textureDescriptors'), True)
+        material = ruri_adapter.build_material([candidates[0]], images, token)
+        assert material['endf_npr_transparent_base']
+        npc.validate_transparent_graph(material)
+        assert not any(node.type == 'GROUP' for node in material.node_tree.nodes)
+        stack = next(item for item in ruri_adapter.stacks()
+                     if item.PANEL_KEY == material['ruri_uber_stack'])
+        before_nodes = [node.as_pointer() for node in material.node_tree.nodes]
+        for _ in range(3):
+            stack._param_write(material)
+            ruri_adapter.rewire_material(stack, material)
+        assert before_nodes == [node.as_pointer() for node in material.node_tree.nodes]
+        report['checks'].append('transparent graph survives provider, repeated sync and rewire')
+        active = deepcopy(candidates[0])
+        active['npr']['floats'][npc.ENABLE] = 1
+        before_materials = {item.as_pointer() for item in bpy.data.materials}
+        before_images = {item.as_pointer() for item in bpy.data.images}
+        try:
+            ruri_adapter.build_material([active], images, token + '-unsupported')
+        except RuntimeError as error:
+            assert 'enabled customization is unsupported' in str(error), str(error)
+        else:
+            raise AssertionError('Active transparent customization was silently discarded')
+        assert before_materials == {item.as_pointer() for item in bpy.data.materials}
+        assert before_images == {item.as_pointer() for item in bpy.data.images}
+        report['checks'].append('unsupported enabled transparent branch reports and cleans failed material/image')
+    finally:
+        for material in list(bpy.data.materials):
+            if str(material.get('sora_instance', '')).startswith(token) and material.users == 0:
+                bpy.data.materials.remove(material)
+        ruri_adapter.release_instance(token)
+        for image in list(bpy.data.images):
+            if str(image.get('sora_instance', '')).startswith(token) and image.users == 0:
+                bpy.data.images.remove(image)
+        report['remainingMaterials'] = sum(str(item.get('sora_instance', '')).startswith(token)
+                                          for item in bpy.data.materials)
+        report['remainingImages'] = sum(str(item.get('sora_instance', '')).startswith(token)
+                                       for item in bpy.data.images)
+    assert report['remainingMaterials'] == report['remainingImages'] == 0
+    report['state'] = 'passed'
+    return report

@@ -17,8 +17,8 @@ spec.loader.exec_module(packaging)
 class PackagingTests(unittest.TestCase):
     def test_source_complete_reproducible_installed_layout(self):
         with tempfile.TemporaryDirectory(prefix='endfield-package-') as folder:
-            first = packaging.build(REPO, Path(folder) / 'first')
-            second = packaging.build(REPO, Path(folder) / 'second')
+            first = packaging.build(REPO, Path(folder) / 'first', working_tree=True)
+            second = packaging.build(REPO, Path(folder) / 'second', working_tree=True)
             self.assertEqual(first['addon']['sha256'], second['addon']['sha256'])
             self.assertEqual(first['source']['sha256'], second['source']['sha256'])
             with zipfile.ZipFile(first['addon']['path']) as addon, zipfile.ZipFile(first['source']['path']) as source:
@@ -26,6 +26,10 @@ class PackagingTests(unittest.TestCase):
                 self.assertTrue(all(name.startswith('endfield_bridge/') for name in names))
                 self.assertFalse(any(name.lower().endswith(('.pyc', '.dll', '.exe', '.sredb')) for name in names))
                 manifest = json.loads(addon.read('endfield_bridge/DISTRIBUTION.json'))
+                self.assertIsNone(manifest['runtimeSourceCommit'])
+                self.assertEqual(manifest['sourceState'], 'uncommitted-working-tree')
+                self.assertEqual(manifest['sourceSnapshotSha256'], first['sourceSnapshotSha256'])
+                self.assertIn('endfield_bridge/tasks.py', names)
                 self.assertEqual(manifest['sourceArchiveSha256'], first['source']['sha256'])
                 for name, expected in manifest['files'].items():
                     self.assertEqual(hashlib.sha256(addon.read('endfield_bridge/' + name)).hexdigest(), expected)
@@ -49,19 +53,9 @@ class PackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='endfield-package-check-') as folder:
             code = '''import importlib.util,sys
 s=importlib.util.spec_from_file_location('p',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
-original_output=m.subprocess.check_output
-def missing_license(*args,**kwargs):
- result=original_output(*args,**kwargs)
- if '--format=zip' in args[0]:
-  output=m.io.BytesIO()
-  with m.zipfile.ZipFile(m.io.BytesIO(result)) as source,m.zipfile.ZipFile(output,'w') as target:
-   for item in source.infolist():
-    data=b'' if item.filename=='endfield_bridge/vendor/ruri_npr/LICENSE.txt' else source.read(item)
-    target.writestr(item,data)
-  return output.getvalue()
- return result
-m.subprocess.check_output=missing_license
-try:m.build(sys.argv[2],sys.argv[3])
+original_read=m.Path.read_bytes
+m.Path.read_bytes=lambda path:b'' if path.as_posix().endswith('/vendor/ruri_npr/LICENSE.txt') else original_read(path)
+try:m.build(sys.argv[2],sys.argv[3],working_tree=True)
 except ValueError as error:
  if 'Missing or empty license' not in str(error):raise
 else:raise RuntimeError('Optimized Python skipped package integrity validation')

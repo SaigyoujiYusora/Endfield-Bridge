@@ -8,6 +8,16 @@ from .materials import build_material, load_images
 
 
 def create_scene(context, document, material_mode=None):
+    """Synchronous compatibility entry point; UI consumes the same generator."""
+    work = create_scene_steps(context, document, material_mode)
+    while True:
+        try:
+            next(work)
+        except StopIteration as finished:
+            return finished.value
+
+
+def create_scene_steps(context, document, material_mode=None):
     material_mode = material_mode or getattr(getattr(context.scene, "sora", None), "material_mode", "RURI")
     if material_mode in {"RURI", "NPR"}:
         from . import ruri_adapter
@@ -34,7 +44,12 @@ def create_scene(context, document, material_mode=None):
         collection = bpy.data.collections.new(document["name"])
         collection["sora_instance"] = token
         context.scene.collection.children.link(collection)
-        image_map = load_images(document.get("textures") or [], token, images, document.get("textureDescriptors"), material_mode in {"RURI", "NPR"})
+        image_map = {}
+        textures = document.get("textures") or []
+        for index, texture in enumerate(textures):
+            yield {"stage": "Loading textures", "completed": index, "total": len(textures)}
+            image_map.update(load_images([texture], token, images, document.get("textureDescriptors"), material_mode in {"RURI", "NPR"}))
+        yield {"stage": "Creating skeleton"}
         def material_for(indices):
             key = tuple(indices)
             if key not in material_cache:
@@ -92,9 +107,11 @@ def create_scene(context, document, material_mode=None):
                     bone['sora_source_hash'] = str(int(source['sourceHash']))
             if shader_frame:
                 rig.rotation_euler.z = math.pi
+            armature.display_type = "STICK"
             rig.show_in_front = True
         mesh_sources = document["meshes"]
-        for source in mesh_sources:
+        for mesh_index, source in enumerate(mesh_sources):
+            yield {"stage": "Creating meshes", "completed": mesh_index, "total": len(mesh_sources)}
             mesh = bpy.data.meshes.new(source["name"])
             owned_data.append(mesh)
             obj = bpy.data.objects.new(source["name"], mesh)
@@ -134,6 +151,7 @@ def create_scene(context, document, material_mode=None):
                     sign.data[i].value = xyzw[3]
             if source.get("sourceId"):
                 obj["sora_source_id"] = str(source["sourceId"])
+            yield {"stage": "Building materials", "completed": mesh_index, "total": len(mesh_sources)}
             slots = source.get("materialSlots")
             if slots is not None and all(index >= 0 for index in slots):
                 count = source.get("submeshCount", 1)
@@ -146,7 +164,9 @@ def create_scene(context, document, material_mode=None):
                 mesh.materials.append(material_for([source["material"]]))
             if rig is not None and source["weights"]:
                 groups = [obj.vertex_groups.new(name=bone["name"]) for bone in document["bones"]]
-                for weight in source["weights"]:
+                for weight_index, weight in enumerate(source["weights"]):
+                    if weight_index % 4096 == 0:
+                        yield {"stage": "Binding skin weights", "completed": weight_index, "total": len(source["weights"])}
                     groups[weight["bone"]].add([weight["vertex"]], weight["weight"], "REPLACE")
                 modifier = obj.modifiers.new("Sora Skin", "ARMATURE")
                 modifier.object = rig
@@ -156,6 +176,7 @@ def create_scene(context, document, material_mode=None):
             if source["shapes"]:
                 obj.shape_key_add(name="Basis")
                 for shape_index, source_shape in enumerate(source["shapes"]):
+                    yield {"stage": "Creating face shapes", "completed": shape_index, "total": len(source["shapes"])}
                     shape = obj.shape_key_add(name=source_shape["name"])
                     for vertex, position, offset in zip(shape.data, source["positions"], source_shape["offsets"]):
                         vertex.co = tuple(a + b for a, b in zip(position, offset))
@@ -175,6 +196,7 @@ def create_scene(context, document, material_mode=None):
         if rig is not None and document.get('faceDriver'):
             from . import face_controls
             face_controls.install(rig, document['faceDriver'], document['bones'])
+        yield {"stage": "Finishing scene binding"}
         context.view_layer.update()
         if material_mode in {"RURI", "NPR"}:
             ruri_adapter.finish_import(context, [obj for obj in created if obj.type == "MESH"])
@@ -182,7 +204,7 @@ def create_scene(context, document, material_mode=None):
                 from .post import enable_for_import
                 enable_for_import(context, material_mode)
         return collection, rig
-    except Exception:
+    except BaseException:
         if context.object is not None and context.object.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
         for obj in reversed(created):

@@ -397,18 +397,27 @@ def draw(layout, context):
         layout.label(text=rig[face_shader.ERROR], icon='ERROR')
     layout.prop(context.scene.sora, 'face_filter', text='Filter')
     query = context.scene.sora.face_filter.lower()
-    for i, control in enumerate(data['controls']):
-        if query and query not in control['name'].lower():
-            continue
+    settings = context.scene.sora
+    controls = [(i, control) for i, control in enumerate(data['controls'])
+                if (not query or query in control['name'].lower())
+                and (not settings.face_modified or abs(rig.get(property_name(i), 0.0)) > 1e-6)]
+    layout.prop(settings, 'face_modified')
+    layout.prop(settings, 'face_index', text=f'Control (0-{max(0, len(controls)-1)})')
+    if controls:
+        i, control = controls[min(settings.face_index, len(controls)-1)]
         row = layout.row()
         row.enabled = not control.get('shader') or bool(rig.get(face_shader.ENABLED))
         row.prop(rig, '["' + property_name(i) + '"]', text=control['name'], slider=True)
-    if query:
-        for i, preset in enumerate(data['presets']):
-            if query in preset['name'].lower():
-                row = layout.row()
-                row.enabled = not preset['missingControls']
-                row.operator('sora.face_preset', text=preset['name']).index = i
+    else:
+        layout.label(text='No matching controls')
+    presets = [(i, preset) for i, preset in enumerate(data['presets'])
+               if not query or query in preset['name'].lower()]
+    if presets:
+        layout.prop(settings, 'face_preset_index', text=f'Preset (0-{len(presets)-1})')
+        i, preset = presets[min(settings.face_preset_index, len(presets)-1)]
+        row = layout.row()
+        row.enabled = not preset['missingControls']
+        row.operator('sora.face_preset', text=preset['name']).index = i
     return True
 
 

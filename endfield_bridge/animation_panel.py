@@ -4,6 +4,9 @@ from bpy.props import BoolProperty, CollectionProperty, IntProperty, PointerProp
 
 from .client import CoreError, request
 from .scene import apply_clip
+from .animation_actions import apply_clip_steps
+from . import tasks
+from .tasks import TaskOperator
 
 
 def target(context):
@@ -43,79 +46,79 @@ class SORA_AnimationSettings(bpy.types.PropertyGroup):
     status: StringProperty(default='Choose the game folder and search native animations')
 
 
-class SORA_OT_animation_search(bpy.types.Operator):
+class SORA_OT_animation_search(TaskOperator, bpy.types.Operator):
     bl_idname = 'sora.animation_search'
     bl_label = 'Search native animations'
 
     def execute(self, context):
         settings = context.scene.sora_animation
         try:
-            if not settings.game_root.strip():
+            if not context.scene.sora.game_root.strip():
                 raise ValueError('Choose the native Game Folder')
-            parameters = {'root': bpy.path.abspath(settings.game_root), 'query': settings.query}
+            parameters = {'root': bpy.path.abspath(context.scene.sora.game_root), 'query': settings.query}
             rig = target(context)
             if rig is not None:
                 parameters.update(path=rig['sora_database'], asset=rig['sora_asset'])
-            rows = call(context, 'animation-search', **parameters)
-            if not isinstance(rows, list):
-                raise CoreError('Animation search returned an invalid list')
-            checked = [(str(row['id']), str(row['path']), str(row['label'])) for row in rows]
-            settings.rows.clear()
-            for identity, path, label in checked:
-                row = settings.rows.add()
-                row.name, row.identity, row.resource_path = label, identity, path
-            settings.selected = 0
-            settings.clips.clear()
-            settings.selected_clip = -1
-            settings.clip_resource = ''
-            settings.status = f'{len(checked)} native animations found'
-            return {'FINISHED'}
+            def complete(rows):
+                if not isinstance(rows, list):
+                    raise CoreError('Animation search returned an invalid list')
+                checked = [(str(row['id']), str(row['path']), str(row['label'])) for row in rows]
+                settings.rows.clear()
+                for identity, path, label in checked:
+                    row = settings.rows.add()
+                    row.name, row.identity, row.resource_path = label, identity, path
+                settings.selected = 0
+                settings.clips.clear()
+                settings.selected_clip = -1
+                settings.clip_resource = ''
+                settings.status = f'{len(checked)} native animations found'
+            return tasks.start(self, context, 'animation-search', parameters, complete)
         except (CoreError, ValueError, KeyError, TypeError, RuntimeError) as error:
             settings.status = str(error)
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
 
 
-class SORA_OT_animation_clips(bpy.types.Operator):
+class SORA_OT_animation_clips(TaskOperator, bpy.types.Operator):
     bl_idname = 'sora.animation_clips'
     bl_label = 'List clips in selected resource'
 
     def execute(self, context):
         settings = context.scene.sora_animation
         try:
-            if not settings.game_root.strip():
+            if not context.scene.sora.game_root.strip():
                 raise ValueError('Choose the native Game Folder')
             if not 0 <= settings.selected < len(settings.rows):
                 raise ValueError('Select a native animation resource')
             resource = settings.rows[settings.selected].resource_path
-            root = bpy.path.abspath(settings.game_root)
+            root = bpy.path.abspath(context.scene.sora.game_root)
             parameters = {'root': root, 'resource': resource}
             rig = target(context)
             if rig is not None:
                 parameters.update(path=rig['sora_database'], asset=rig['sora_asset'])
-            result = call(context, 'animation-clips', **parameters)
-            if not isinstance(result, list) or not result:
-                raise CoreError('Animation resource has no clips')
-            checked = []
-            for row in result:
-                if row['resourcePath'] != resource or not isinstance(row['pathId'], str):
-                    raise CoreError('Animation clip source identity mismatch')
-                checked.append((row['name'], row['cab'], row['pathId']))
-            settings.clips.clear()
-            for name, cab, path_id in checked:
-                row = settings.clips.add()
-                row.name, row.cab, row.path_id = name, cab, path_id
-            settings.clip_resource, settings.clip_root = resource, root
-            settings.selected_clip = 0 if len(checked) == 1 else -1
-            settings.status = f'{len(checked)} clips found; select the clip to load'
-            return {'FINISHED'}
+            def complete(result):
+                if not isinstance(result, list) or not result:
+                    raise CoreError('Animation resource has no clips')
+                checked = []
+                for row in result:
+                    if row['resourcePath'] != resource or not isinstance(row['pathId'], str):
+                        raise CoreError('Animation clip source identity mismatch')
+                    checked.append((row['name'], row['cab'], row['pathId']))
+                settings.clips.clear()
+                for name, cab, path_id in checked:
+                    row = settings.clips.add()
+                    row.name, row.cab, row.path_id = name, cab, path_id
+                settings.clip_resource, settings.clip_root = resource, root
+                settings.selected_clip = 0 if len(checked) == 1 else -1
+                settings.status = f'{len(checked)} clips found; select the clip to load'
+            return tasks.start(self, context, 'animation-clips', parameters, complete)
         except (CoreError, ValueError, KeyError, TypeError, RuntimeError) as error:
             settings.status = str(error)
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
 
 
-class SORA_OT_animation_import(bpy.types.Operator):
+class SORA_OT_animation_import(TaskOperator, bpy.types.Operator):
     bl_idname = 'sora.animation_import'
     bl_label = 'Load selected native animation'
     bl_options = {'REGISTER', 'UNDO'}
@@ -128,33 +131,34 @@ class SORA_OT_animation_import(bpy.types.Operator):
         settings = context.scene.sora_animation
         rig = target(context)
         try:
-            if not settings.game_root.strip():
+            if not context.scene.sora.game_root.strip():
                 raise ValueError('Choose the native Game Folder')
             if not 0 <= settings.selected < len(settings.rows):
                 raise ValueError('Select a native animation from the search results')
             row = settings.rows[settings.selected]
-            if settings.clip_resource != row.resource_path or settings.clip_root != bpy.path.abspath(settings.game_root):
+            if settings.clip_resource != row.resource_path or settings.clip_root != bpy.path.abspath(context.scene.sora.game_root):
                 raise ValueError('List the clips in this resource before loading')
             if not 0 <= settings.selected_clip < len(settings.clips):
                 raise ValueError('Select an exact clip from this resource')
             selected = settings.clips[settings.selected_clip]
-            result = call(context, 'animation-import', root=bpy.path.abspath(settings.game_root),
+            parameters = dict( root=bpy.path.abspath(context.scene.sora.game_root),
                           path=rig['sora_database'], asset=rig['sora_asset'], resource=row.resource_path,
                           selection={'cab': selected.cab, 'pathId': selected.path_id})
-            clip, bones = result['clip'], result['bones']
-            metadata = {key:value for key,value in result.items() if key not in {'clip','bones'}}
-            if metadata:
-                clip = dict(clip)
-                native = dict(clip.get('native') or {})
-                for key,value in metadata.items():
-                    if key in native and native[key] != value:
-                        raise CoreError('Conflicting native animation metadata: ' + key)
-                    native[key] = value
-                clip['native'] = native
-            action = apply_clip(context, rig, clip, [bone['name'] for bone in bones],
-                                bone_sources=bones, keep_face_controls=settings.keep_face_controls)
-            settings.status = 'Loaded ' + clip['name'] + ('; manual Face controls override retained face keys' if action.get('sora_face_mode') == 'MANUAL' else '')
-            return {'FINISHED'}
+            def complete(result):
+                clip, bones = result['clip'], result['bones']
+                metadata = {key:value for key,value in result.items() if key not in {'clip','bones'}}
+                if metadata:
+                    clip = dict(clip)
+                    native = dict(clip.get('native') or {})
+                    for key,value in metadata.items():
+                        if key in native and native[key] != value:
+                            raise CoreError('Conflicting native animation metadata: ' + key)
+                        native[key] = value
+                    clip['native'] = native
+                action = yield from apply_clip_steps(context, rig, clip, [bone['name'] for bone in bones],
+                                    bone_sources=bones, keep_face_controls=settings.keep_face_controls)
+                settings.status = 'Loaded ' + clip['name'] + ('; manual Face controls override retained face keys' if action.get('sora_face_mode') == 'MANUAL' else '')
+            return tasks.start(self, context, 'animation-import', parameters, complete)
         except (CoreError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as error:
             settings.status = str(error)
             self.report({'ERROR'}, str(error))
@@ -182,14 +186,14 @@ class SORA_OT_animation_face(bpy.types.Operator):
 
 def draw(layout, context):
     settings = context.scene.sora_animation
-    layout.prop(settings, 'game_root')
+    layout.label(text='Uses the shared Game Folder')
     layout.prop(settings, 'query')
     layout.operator('sora.animation_search')
     layout.template_list('UI_UL_list', 'native_animations', settings, 'rows', settings, 'selected', rows=5)
     layout.operator('sora.animation_clips')
     if (0 <= settings.selected < len(settings.rows)
             and settings.clip_resource == settings.rows[settings.selected].resource_path
-            and settings.clip_root == bpy.path.abspath(settings.game_root)):
+            and settings.clip_root == bpy.path.abspath(context.scene.sora.game_root)):
         layout.template_list('UI_UL_list', 'native_animation_clips', settings, 'clips', settings, 'selected_clip', rows=3)
     layout.prop(settings, 'keep_face_controls')
     layout.operator('sora.animation_import')

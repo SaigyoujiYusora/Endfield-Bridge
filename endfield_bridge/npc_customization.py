@@ -15,6 +15,25 @@ COLORS = ('_CustomizeBaseColor', '_CustomizeBaseTintColor', '_CustomizeAddTintCo
 MARKER = 'endf_npc_customization'
 
 
+def validate_transparent_graph(material):
+    """Validate the flat BaseMap graph before excluding Standard s1 consumers."""
+    nodes = list(material.node_tree.nodes) if material.node_tree else []
+    kinds = {node.type for node in nodes}
+    if ('GROUP' in kinds
+            or not {'BSDF_TRANSPARENT', 'EMISSION', 'MIX_SHADER', 'TEX_IMAGE'}.issubset(kinds)):
+        raise RuntimeError('ENDF NPR-Shader transparent BaseMap graph contract changed: ' + material.name)
+    products = [node for node in nodes if node.bl_idname == 'ShaderNodeMixRGB'
+        and node.blend_type == 'MULTIPLY' and not node.use_clamp
+        and not node.inputs[0].is_linked and node.inputs[0].default_value == 1.0
+        and len(node.inputs[1].links) == 1
+        and node.inputs[1].links[0].from_node.type == 'TEX_IMAGE'
+        and node.inputs[1].links[0].from_socket.name == 'Color'
+        and not node.inputs[2].is_linked]
+    if len(products) != 1 or not any(link.to_node.type == 'EMISSION'
+            and link.to_socket.name == 'Color' for link in products[0].outputs['Color'].links):
+        raise RuntimeError('ENDF NPR-Shader transparent albedo contract changed: ' + material.name)
+
+
 def _source(socket, name):
     return (len(socket.links) == 1 and socket.links[0].from_node.type == 'GROUP_INPUT'
             and socket.links[0].from_socket.name == name)
@@ -93,10 +112,18 @@ def sync(material):
         # Blender stores socket vectors as float32. Compare that representation
         # to avoid redundant writes/update tags for native double snapshots.
         values[name] = tuple(struct.unpack('<f', struct.pack('<f', float(v)))[0] for v in value[:3])
+    # The provider replaces transparent Standard segments before _param_write.
+    # Its explicit marker is assigned at replacement time, not after provider()
+    # returns. Asset kind/name is deliberately irrelevant to this contract.
+    if material.get('endf_npr_transparent_base'):
+        validate_transparent_graph(material)
+        if enable > 0.5:
+            raise RuntimeError('NPC customization: enabled customization is unsupported on the transparent BaseMap path: ' + material.name)
+        return
     nodes = [n for n in material.node_tree.nodes if n.type == 'GROUP' and n.node_tree
              and n.get('ruri_inst') == 1 and n.inputs.get('F0_BaseMap') is not None]
     if len(nodes) != 1:
-        raise RuntimeError('NPC customization: expected one Standard s1 instance')
+        raise RuntimeError('NPC customization: expected one Standard s1 instance: ' + material.name)
     node = nodes[0]
     if node.node_tree.get(MARKER) != STAMP or node.node_tree.users > 1:
         clone = node.node_tree.copy()
