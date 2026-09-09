@@ -1,5 +1,5 @@
 bl_info = {
-    "name": "Endfield-Bridge", "author": "SaigyoujiYusora", "version": (0, 1, 0),
+    "name": "Endfield-Bridge", "author": "OMGKawaiiYusora", "version": (0, 1, 0),
     "blender": (5, 1, 0), "location": "View3D > Sidebar > ENDF2Blend",
     "description": "Import Sora-Core scenes, drive faces and play animations", "category": "Import-Export",
 }
