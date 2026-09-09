@@ -390,24 +390,40 @@ def migrate_saved_sources(_=None):
         migrate_scene(scene, bpy.path.abspath, lambda value: Path(value).is_dir())
 
 
-def register():
-    from . import post, ruri_adapter, material_panel
-    ruri_adapter.register()
-    for cls in CLASSES:
-        bpy.utils.register_class(cls)
-    bpy.types.Scene.sora = bpy.props.PointerProperty(type=SORA_Settings)
-    post.register()
-    material_panel.register()
-    from . import face_controls
-    face_controls.register()
-    from . import animation_panel
-    animation_panel.register()
-    if migrate_saved_sources not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(migrate_saved_sources)
+def _migrate_sources_timer():
     migrate_saved_sources()
+    return None
+
+
+def register():
+    from . import post, ruri_adapter, material_panel, face_controls, animation_panel
+    from .registration import RegistrationTransaction
+    transaction = RegistrationTransaction(bpy, __package__, (
+        (bpy.types.Scene, 'sora'), (bpy.types.Scene, 'sora_animation'),
+        (bpy.types.WindowManager, 'endf_npr_search')))
+    try:
+        ruri_adapter.register()
+        for cls in CLASSES:
+            bpy.utils.register_class(cls)
+        bpy.types.Scene.sora = bpy.props.PointerProperty(type=SORA_Settings)
+        post.register()
+        material_panel.register()
+        face_controls.register()
+        animation_panel.register()
+        if migrate_saved_sources not in bpy.app.handlers.load_post:
+            bpy.app.handlers.load_post.append(migrate_saved_sources)
+        if not bpy.app.timers.is_registered(_migrate_sources_timer):
+            bpy.app.timers.register(_migrate_sources_timer, first_interval=0.0)
+    except Exception as error:
+        failures = transaction.rollback()
+        if failures:
+            raise RuntimeError(str(error) + '; registration rollback: ' + '; '.join(failures)) from error
+        raise
 
 
 def unregister():
+    if bpy.app.timers.is_registered(_migrate_sources_timer):
+        bpy.app.timers.unregister(_migrate_sources_timer)
     if migrate_saved_sources in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(migrate_saved_sources)
     tasks.shutdown()
