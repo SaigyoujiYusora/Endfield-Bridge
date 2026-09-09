@@ -180,7 +180,12 @@ def request_task(executable, method, **parameters):
 
 
 def close_sessions():
-    for session in _sessions.values():
-        if session.process.poll() is None:
-            session.process.stdin.close()
+    for session in list(_sessions.values()):
+        try:
+            if session.process.poll() is None:
+                session.process.stdin.close()
+        except (OSError, ValueError) as error:
+            print('[Endfield-Bridge session cleanup] ' + str(error))
+            if session.process.poll() is None:
+                session.process.terminate()
     _sessions.clear()

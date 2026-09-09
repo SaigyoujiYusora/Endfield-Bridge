@@ -168,6 +168,8 @@ def stacks():
                 group = existing if existing is not None else super().group(name)
                 group['endf_npr_source_group'] = name
                 group.name = name.replace('Ruri Endfield Uber', 'ENDF NPR-Shader Character').replace('Ruri Endfield', 'ENDF NPR-Shader')
+                from .view_direction import patch_group
+                patch_group(group)
                 return group
 
             def _clone_vtx(self, template_name, clone_name, mat):

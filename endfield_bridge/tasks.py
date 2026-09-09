@@ -2,6 +2,7 @@
 import queue
 import time
 import bpy
+from bpy.app.handlers import persistent
 from .client import request_task, close_sessions, CoreError
 
 _active = None
@@ -16,7 +17,26 @@ def start(operator, context, method, parameters, complete):
     if busy():
         raise CoreError('Wait for or cancel the current task')
     preferences = context.preferences.addons[__package__].preferences
-    operator._task = request_task(bpy.path.abspath(preferences.executable), method, **parameters)
+    task = request_task(bpy.path.abspath(preferences.executable), method, **parameters)
+    return _attach(operator, context, method, complete, task)
+
+
+def start_local(operator, context, stage, complete):
+    from types import SimpleNamespace
+    if busy():
+        raise CoreError('Wait for or cancel the current task')
+    events = queue.Queue()
+    events.put({'ok': True, 'result': None})
+    task = SimpleNamespace(events=events, process=SimpleNamespace(poll=lambda: 0),
+                           cancel=lambda: None, terminate=lambda: None)
+    return _attach(operator, context, stage, complete, task)
+
+
+def _attach(operator, context, method, complete, task):
+    global _active
+    operator._closed = False
+    operator._window_manager = context.window_manager
+    operator._task = task
     operator._complete = complete
     operator._steps = None
     operator._cancelled = False
@@ -49,37 +69,63 @@ def cancel():
 
 def _finish(operator, context, error=None):
     global _active
-    settings = operator._scene.sora
-    if operator._steps:
+    if getattr(operator, '_closed', False):
+        return {'CANCELLED'}
+    operator._closed = True
+    errors = [str(error)] if error else []
+    try:
+        if operator._steps:
+            try:
+                with context.temp_override(**operator._override):
+                    operator._steps.close()
+            except Exception as cleanup_error:
+                errors.append('rollback: ' + str(cleanup_error))
+            finally:
+                operator._steps = None
+        if errors:
+            try:
+                operator._task.cancel()
+                operator._task.terminate()
+            except Exception as cleanup_error:
+                errors.append('process cleanup: ' + str(cleanup_error))
         try:
-            with context.temp_override(**operator._override):
-                operator._steps.close()
+            operator._window_manager.event_timer_remove(operator._timer)
         except Exception as cleanup_error:
-            error = str(error or '') + '; rollback: ' + str(cleanup_error)
-    if error:
-        operator._task.cancel()
-        operator._task.terminate()
-    context.window_manager.event_timer_remove(operator._timer)
-    settings.task_running = False
-    if error:
-        settings.task_error = settings.task_stage + ': ' + str(error)
-        settings.status = settings.task_error
-        operator.report({'WARNING'} if operator._cancelled else {'ERROR'}, str(error))
-    else:
-        settings.task_stage = 'Complete'
-    _active = None
-    return {'CANCELLED'} if error else {'FINISHED'}
+            errors.append('timer cleanup: ' + str(cleanup_error))
+        try:
+            settings = operator._scene.sora
+            settings.task_running = False
+            if errors:
+                settings.task_error = settings.task_stage + ': ' + '; '.join(errors)
+                settings.status = settings.task_error
+            else:
+                settings.task_stage = 'Complete'
+        except (AttributeError, ReferenceError) as cleanup_error:
+            errors.append('task scene unavailable: ' + str(cleanup_error))
+    finally:
+        if _active is operator:
+            _active = None
+    if errors:
+        message = '; '.join(errors)
+        print('[Endfield-Bridge task] ' + message)
+        try:
+            operator.report({'WARNING'} if operator._cancelled else {'ERROR'}, message)
+        except Exception as report_error:
+            print('[Endfield-Bridge task report unavailable] ' + str(report_error))
+    return {'CANCELLED'} if errors else {'FINISHED'}
 
 
 class TaskOperator:
     def modal(self, context, event):
+        if getattr(self, '_closed', False):
+            return {'CANCELLED'}
         if event.type == 'ESC':
             cancel()
         if event.type != 'TIMER':
             return {'PASS_THROUGH'}
-        settings = self._scene.sora
-        settings.task_tick = (settings.task_tick + 1) % 20000
         try:
+            settings = self._scene.sora
+            settings.task_tick = (settings.task_tick + 1) % 20000
             if (context.scene != self._scene or context.window != self._window
                     or context.view_layer != self._view_layer or context.mode != self._mode):
                 self._cancelled = True
@@ -130,9 +176,37 @@ class TaskOperator:
 
 
 def shutdown():
+    operator = _active
+    if operator is not None:
+        operator._cancelled = True
+        _finish(operator, bpy.context, 'Task cancelled before addon unload or file load')
     close_sessions()
-    if _active:
-        cancel()
-        _active._task.terminate()
-        if _active._steps:
-            _active._steps.close()
+
+
+@persistent
+def _before_load(_):
+    shutdown()
+
+
+@persistent
+def _after_load(_):
+    if not busy():
+        for scene in bpy.data.scenes:
+            settings = getattr(scene, 'sora', None)
+            if settings is not None:
+                settings.task_running = False
+
+
+def register():
+    if _before_load not in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.append(_before_load)
+    if _after_load not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_after_load)
+
+
+def unregister():
+    shutdown()
+    if _before_load in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.remove(_before_load)
+    if _after_load in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_after_load)

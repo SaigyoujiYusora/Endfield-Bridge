@@ -30,9 +30,10 @@ def create_scene_steps(context, document, material_mode=None):
     previous_selected = list(context.selected_objects)
     if context.mode != "OBJECT":
         raise ValueError("Switch to Object Mode before importing")
-    shader_frame = material_mode in {"RURI", "NPR"} and any(m.get("npr") for m in document["materials"])
+    shader_frame = any(m.get("npr") for m in document["materials"])
     native_bones = document["bones"]
     if shader_frame:
+        from . import ruri_adapter
         from .ruri_adapter import object_frame
         document = object_frame(document)
     collection = None
@@ -123,6 +124,7 @@ def create_scene_steps(context, document, material_mode=None):
             created.append(obj)
             collection.objects.link(obj)
             obj["sora_instance"] = token
+            obj["sora_render_mesh_index"] = mesh_index
             mesh.from_pydata(source["positions"], [], source["triangles"])
             mesh.update()
             for polygon in mesh.polygons:
@@ -197,7 +199,7 @@ def create_scene_steps(context, document, material_mode=None):
                     variable.targets[0].id = obj
                     variable.targets[0].data_path = '["' + property_name + '"]'
                     obj["sora_face_" + property_name] = shape.name
-            if material_mode in {"RURI", "NPR"}:
+            if shader_frame:
                 ruri_adapter.prepare_mesh(obj, source)
         if rig is not None and document.get('faceDriver'):
             from . import face_controls
@@ -209,6 +211,8 @@ def create_scene_steps(context, document, material_mode=None):
             if any(material.get('ruri_uber_stack') for material in materials):
                 from .post import enable_for_import
                 enable_for_import(context, material_mode)
+        from .render_modes import initialize
+        initialize(collection, document, material_mode, shader_frame)
         return collection, rig
     except BaseException:
         if context.object is not None and context.object.mode != "OBJECT":

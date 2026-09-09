@@ -48,6 +48,11 @@ class SORA_AssetRow(bpy.types.PropertyGroup):
     can_import: BoolProperty(default=False)
     reason: StringProperty()
     kind: StringProperty()
+    internal_name: StringProperty()
+    display_zh: StringProperty()
+    display_en: StringProperty()
+    localization_status: StringProperty()
+    resource_path: StringProperty()
 
 
 def update_npr_post(self, context):
@@ -169,6 +174,13 @@ class SORA_OT_search(TaskOperator, bpy.types.Operator):
                 for source in result['rows']:
                     row = settings.assets.add()
                     row.name = source['label']
+                    metadata = source.get('metadata') or {}
+                    locator = source.get('locator') or {}
+                    row.resource_path = locator.get('path') or ''
+                    row.internal_name = metadata.get('internalName') or (row.resource_path.rsplit('/', 1)[-1].rsplit('.', 1)[0] if row.resource_path else source['label'])
+                    row.display_zh = metadata.get('displayNameZh') or ''
+                    row.display_en = metadata.get('displayNameEn') or ''
+                    row.localization_status = metadata.get('localizationStatus') or 'missing-translation'
                     row.identity = source['id']
                     row.detail = source.get('detail', '')
                     row.has_scene = source.get('hasScene', False)
@@ -333,6 +345,13 @@ class SORA_OT_copy_diagnostics(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class SORA_UL_assets(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index=0, flt_flag=0):
+        column = layout.column(align=True)
+        column.label(text=item.display_zh or item.name, icon='OUTLINER_OB_MESH')
+        column.label(text=item.internal_name + (' [no Chinese name]' if not item.display_zh else ''))
+
+
 class SORA_PT_panel(bpy.types.Panel):
     bl_label = "ENDF2Blend"
     bl_idname = "SORA_PT_panel"
@@ -378,7 +397,7 @@ class SORA_PT_panel(bpy.types.Panel):
             else: box.label(text='通用武器（按后端支持范围）')
             box.prop(settings, 'query')
             box.operator('sora.search')
-            box.template_list('UI_UL_list', 'sora_assets', settings, 'assets', settings, 'selected', rows=4)
+            box.template_list('SORA_UL_assets', 'sora_assets', settings, 'assets', settings, 'selected', rows=4)
             row = box.row(align=True)
             previous = row.row(); previous.enabled = settings.offset > 0
             previous.operator('sora.search', text='', icon='TRIA_LEFT').direction = -1
@@ -387,6 +406,9 @@ class SORA_PT_panel(bpy.types.Panel):
             following.operator('sora.search', text='', icon='TRIA_RIGHT').direction = 1
             if 0 <= settings.selected < len(settings.assets):
                 asset = settings.assets[settings.selected]
+                wrapped_label(box, '中文: ' + (asset.display_zh or '原生中文名缺失'), context)
+                wrapped_label(box, '内部: ' + asset.internal_name, context)
+                if asset.resource_path: wrapped_label(box, asset.resource_path, context)
                 wrapped_label(box, asset.detail, context)
                 wrapped_label(box, asset.reason, context)
             box.operator('sora.import_asset')
@@ -413,6 +435,8 @@ class SORA_PT_panel(bpy.types.Panel):
             from . import pose_controls
             pose_controls.draw(box, context)
         elif settings.function_page == 'MATERIAL':
+            from . import render_modes
+            render_modes.draw(box, context)
             box.prop(settings, 'material_mode', text='New imports')
             box.prop(settings, 'npr_post_processing')
             box.label(text='Post-processing affects the entire scene', icon='INFO')
@@ -428,7 +452,7 @@ class SORA_PT_panel(bpy.types.Panel):
                 wrapped_label(details, settings.task_error, context)
 
 
-CLASSES = (SORA_Preferences, SORA_AssetRow, SORA_Settings, SORA_OT_check, SORA_OT_cancel, SORA_OT_database, SORA_OT_instance, SORA_OT_stick, SORA_OT_search, SORA_OT_import, SORA_OT_remove, SORA_OT_clip, SORA_OT_copy_diagnostics, SORA_PT_panel)
+CLASSES = (SORA_Preferences, SORA_AssetRow, SORA_Settings, SORA_OT_check, SORA_OT_cancel, SORA_OT_database, SORA_OT_instance, SORA_OT_stick, SORA_OT_search, SORA_OT_import, SORA_OT_remove, SORA_OT_clip, SORA_OT_copy_diagnostics, SORA_UL_assets, SORA_PT_panel)
 
 
 @persistent
@@ -445,7 +469,7 @@ def _migrate_sources_timer():
 
 
 def register():
-    from . import post, ruri_adapter, material_panel, face_controls, animation_panel, pose_controls
+    from . import post, ruri_adapter, material_panel, face_controls, animation_panel, pose_controls, render_modes
     from .registration import RegistrationTransaction
     transaction = RegistrationTransaction(bpy, __package__, (
         (bpy.types.Scene, 'sora'), (bpy.types.Scene, 'sora_animation'),
@@ -460,6 +484,8 @@ def register():
         face_controls.register()
         animation_panel.register()
         pose_controls.register()
+        render_modes.register()
+        tasks.register()
         if migrate_saved_sources not in bpy.app.handlers.load_post:
             bpy.app.handlers.load_post.append(migrate_saved_sources)
         if not bpy.app.timers.is_registered(_migrate_sources_timer):
@@ -476,8 +502,9 @@ def unregister():
         bpy.app.timers.unregister(_migrate_sources_timer)
     if migrate_saved_sources in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(migrate_saved_sources)
-    tasks.shutdown()
-    from . import pose_controls
+    tasks.unregister()
+    from . import pose_controls, render_modes
+    render_modes.unregister()
     pose_controls.unregister()
     from . import animation_panel
     animation_panel.unregister()
