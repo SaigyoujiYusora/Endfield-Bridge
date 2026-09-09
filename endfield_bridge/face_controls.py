@@ -23,6 +23,8 @@ _reflection = Matrix.Diagonal((-1, 1, 1, 1))
 
 
 def rig_for(obj):
+    if obj is not None and obj.get('sora_owner_collection'):
+        obj = next((o for o in obj['sora_owner_collection'].objects if o.type == 'ARMATURE' and DATA in o), None)
     if obj is None:
         return None
     if obj.type == 'ARMATURE' and DATA in obj:

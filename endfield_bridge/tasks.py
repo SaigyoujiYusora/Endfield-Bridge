@@ -140,6 +140,7 @@ class TaskOperator:
                     with context.temp_override(**self._override):
                         progress = next(self._steps)
                     settings.task_stage = progress['stage']
+                    settings.task_detail = str(progress.get('detail') or '')
                     settings.task_completed = progress.get('completed', 0)
                     settings.task_total = progress.get('total', 0)
                 except StopIteration:

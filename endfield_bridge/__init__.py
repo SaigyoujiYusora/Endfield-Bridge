@@ -28,13 +28,13 @@ class SORA_OT_remove(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        obj = context.object
-        matches = [c for c in obj.users_collection if c.get("sora_instance") == obj.get("sora_instance")] if obj and obj.get("sora_instance") else []
-        if len(matches) != 1:
-            self.report({"ERROR"}, "Select an object in one imported collection")
-            return {"CANCELLED"}
+        from .equipment import owner_collection
+        collection = owner_collection(context)
+        if collection is None:
+            self.report({'ERROR'}, 'Select an object in an imported instance')
+            return {'CANCELLED'}
         try:
-            remove_scene(context, matches[0])
+            remove_scene(context, collection)
             return {"FINISHED"}
         except ValueError as error:
             self.report({"ERROR"}, str(error))
@@ -53,6 +53,7 @@ class SORA_AssetRow(bpy.types.PropertyGroup):
     display_en: StringProperty()
     localization_status: StringProperty()
     resource_path: StringProperty()
+    database_mode: StringProperty()
 
 
 def update_npr_post(self, context):
@@ -176,6 +177,7 @@ class SORA_OT_search(TaskOperator, bpy.types.Operator):
                     row.name = source['label']
                     metadata = source.get('metadata') or {}
                     locator = source.get('locator') or {}
+                    row.database_mode = source.get('databaseMode') or ('indexed-game' if locator else 'standalone-scene')
                     row.resource_path = locator.get('path') or ''
                     row.internal_name = metadata.get('internalName') or (row.resource_path.rsplit('/', 1)[-1].rsplit('.', 1)[0] if row.resource_path else source['label'])
                     row.display_zh = metadata.get('displayNameZh') or ''
@@ -209,6 +211,7 @@ def import_reason(context):
     if settings.result_database != bpy.path.abspath(settings.database): return 'Load / search the selected database'
     if not 0 <= settings.selected < len(settings.assets): return 'Select an asset'
     row = settings.assets[settings.selected]
+    if row.database_mode not in {'indexed-game','standalone-scene'}: return 'Reload search to identify database coverage'
     return '' if row.can_import else row.reason
 
 
@@ -224,22 +227,47 @@ class SORA_OT_import(TaskOperator, bpy.types.Operator):
         identity = settings.assets[settings.selected].identity
         database = bpy.path.abspath(settings.database)
         mode = settings.material_mode
-        def complete(document):
-            collection, rig = yield from create_scene_steps(context, document, mode)
-            for obj in collection.objects:
-                obj['sora_asset'] = identity
-                obj['sora_database'] = database
-            imported = rig or next((obj for obj in collection.objects if obj.type == 'MESH'), None)
-            if imported is not None:
-                for selected in list(context.selected_objects):
-                    selected.select_set(False)
-                imported.select_set(True)
-                context.view_layer.objects.active = imported
-            settings.status = 'Imported ' + document['name']
-            settings.clip = document['clips'][0]['name'] if document['clips'] else ''
+        row = settings.assets[settings.selected]
+        asset_kind = row.kind
+        source_path = row.resource_path or (identity if identity.startswith('assets/') else '')
+        formal_character = asset_kind == 'character' and row.database_mode == 'indexed-game'
+        prior_active = context.view_layer.objects.active
+        prior_selected = list(context.selected_objects)
+        def complete(result):
+            document = result['scene'] if formal_character else result
+            collection = None
+            try:
+                collection, rig = yield from create_scene_steps(context, document, mode)
+                for obj in collection.objects:
+                    obj['sora_asset'] = identity
+                    obj['sora_database'] = database
+                    obj['sora_resource_path'] = source_path
+                if formal_character:
+                    from .equipment import create_dedicated_steps
+                    yield from create_dedicated_steps(context, collection, rig, result['equipment'], mode)
+                elif asset_kind == 'character':
+                    collection['sora_equipment_status'] = 'Standalone Scene: dedicated equipment not associated; load it explicitly with a matching game folder'
+                imported = rig or next((obj for obj in collection.objects if obj.type == 'MESH'), None)
+                if imported is not None:
+                    for selected in list(context.selected_objects): selected.select_set(False)
+                    imported.select_set(True)
+                    context.view_layer.objects.active = imported
+                settings.status = 'Imported ' + document['name'] + ('; static dedicated equipment ready, events/damping not evaluated' if formal_character else '')
+                settings.clip = document['clips'][0]['name'] if document['clips'] else ''
+            except BaseException:
+                if collection is not None:
+                    remove_scene(context, collection, force_cleanup=True)
+                for selected in list(context.selected_objects): selected.select_set(False)
+                for selected in prior_selected:
+                    if selected.name in context.view_layer.objects: selected.select_set(True)
+                if prior_active and prior_active.name in context.view_layer.objects:
+                    context.view_layer.objects.active = prior_active
+                raise
         try:
-            return tasks.start(self, context, 'scene', {'path':database,'asset':identity,
-                'root':bpy.path.abspath(settings.game_root) if settings.game_root else ''}, complete)
+            parameters = {'path': database, 'asset': identity,
+                'root': bpy.path.abspath(settings.game_root) if settings.game_root else ''}
+            if formal_character: parameters['includeOwner'] = True
+            return tasks.start(self, context, 'equipment-assembly' if formal_character else 'scene', parameters, complete)
         except (CoreError, ValueError) as error:
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
@@ -249,12 +277,13 @@ class SORA_OT_instance(bpy.types.Operator):
     bl_idname = 'sora.select_instance'
     bl_label = 'Next imported instance'
     def execute(self, context):
-        roots = [c for c in bpy.data.collections if c.get('sora_instance')
+        roots = [c for c in bpy.data.collections if c.get('sora_instance') and not c.get('sora_owner_collection')
                  and any(o.name in context.view_layer.objects and o.visible_get(view_layer=context.view_layer) for o in c.objects)]
         if not roots:
             return {'CANCELLED'}
-        current = context.object.get('sora_instance') if context.object else None
-        index = next((i for i, c in enumerate(roots) if c.get('sora_instance') == current), -1)
+        from .equipment import owner_collection
+        current = owner_collection(context)
+        index = next((i for i, c in enumerate(roots) if c == current), -1)
         collection = roots[(index + 1) % len(roots)]
         visible = [o for o in collection.objects if o.name in context.view_layer.objects and o.visible_get(view_layer=context.view_layer)]
         obj = next((o for o in visible if o.type == 'ARMATURE' and not o.get('sora_display_source')), visible[0])
@@ -326,14 +355,11 @@ def wrapped_label(layout, value, context):
 
 
 def instance_name(context):
-    obj = context.object
-    token = obj.get('sora_instance') if obj else None
-    if not token:
-        return 'No imported instance selected'
-    collection = next((c for c in obj.users_collection if c.get('sora_instance') == token), None)
+    from .equipment import owner_collection
+    collection = owner_collection(context)
     if collection is None:
-        return 'Imported instance collection unavailable'
-    rig = next((o for o in collection.objects if o.type == 'ARMATURE'), None)
+        return 'No imported instance selected'
+    rig = next((o for o in collection.objects if o.type == 'ARMATURE' and not o.get('sora_display_source')), None)
     return rig.name if rig else collection.name
 
 
@@ -441,8 +467,8 @@ class SORA_PT_panel(bpy.types.Panel):
             box.prop(settings, 'npr_post_processing')
             box.label(text='Post-processing affects the entire scene', icon='INFO')
         else:
-            box.label(text='专用装备归属于角色；通用武器独立管理')
-            box.label(text='Equipment binding support pending', icon='INFO')
+            from . import equipment
+            equipment.draw(box, context)
         wrapped_label(layout, 'Task failed; open error details' if settings.task_error else settings.status, context)
         if settings.task_error:
             layout.prop(settings, 'diagnostics')
@@ -469,7 +495,7 @@ def _migrate_sources_timer():
 
 
 def register():
-    from . import post, ruri_adapter, material_panel, face_controls, animation_panel, pose_controls, render_modes
+    from . import post, ruri_adapter, material_panel, face_controls, animation_panel, pose_controls, render_modes, equipment
     from .registration import RegistrationTransaction
     transaction = RegistrationTransaction(bpy, __package__, (
         (bpy.types.Scene, 'sora'), (bpy.types.Scene, 'sora_animation'),
@@ -485,6 +511,7 @@ def register():
         animation_panel.register()
         pose_controls.register()
         render_modes.register()
+        equipment.register()
         tasks.register()
         if migrate_saved_sources not in bpy.app.handlers.load_post:
             bpy.app.handlers.load_post.append(migrate_saved_sources)
@@ -503,7 +530,8 @@ def unregister():
     if migrate_saved_sources in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(migrate_saved_sources)
     tasks.unregister()
-    from . import pose_controls, render_modes
+    from . import pose_controls, render_modes, equipment
+    equipment.unregister()
     render_modes.unregister()
     pose_controls.unregister()
     from . import animation_panel

@@ -104,9 +104,10 @@ def create_scene_steps(context, document, material_mode=None):
                     bone.parent = bones[source["parent"]]
                 bones.append(bone)
             bpy.ops.object.mode_set(mode="OBJECT")
-            for source in document["bones"]:
+            for source_index, source in enumerate(document["bones"]):
                 bone = armature.bones[source["name"]]
                 bone["sora_source_path"] = source.get("sourcePath") or ""
+                bone["sora_source_index"] = source_index
                 if source.get('sourceHash') is not None:
                     bone['sora_source_hash'] = str(int(source['sourceHash']))
             if shader_frame:
@@ -260,10 +261,24 @@ def _release_instance_data(token, outline_tokens=()):
             bpy.data.actions.remove(action)
 
 
-def remove_scene(context, collection):
+def _validate_remove_tree(collection, seen=None):
+    seen=set() if seen is None else seen
+    if collection.as_pointer() in seen:raise ValueError('Imported collection ownership cycle')
+    seen.add(collection.as_pointer())
+    token=collection.get('sora_instance')
+    if not token or any(obj.get('sora_instance')!=token or len(obj.users_collection)!=1 for obj in collection.objects):
+        raise ValueError('Collection contains shared or foreign objects')
+    for child in collection.children:
+        if child.get('sora_owner_collection')!=collection:
+            raise ValueError('Collection contains a child outside this imported instance')
+        _validate_remove_tree(child,seen)
+
+
+def remove_scene(context, collection, force_cleanup=False):
     """Remove one explicitly selected imported collection and unused owned data."""
-    if context.mode != "OBJECT":
+    if context.mode != "OBJECT" and not force_cleanup:
         raise ValueError("Switch to Object Mode before removing an import")
+    _validate_remove_tree(collection)
     token = collection.get("sora_instance")
     if not token:
         raise ValueError("Collection is not an Endfield-Bridge import")
@@ -272,6 +287,13 @@ def remove_scene(context, collection):
         raise ValueError("Collection contains objects outside this import")
     if any(len(obj.users_collection) != 1 for obj in objects):
         raise ValueError("An imported object is linked to another collection")
+    for child in list(collection.children):
+        remove_scene(context,child,force_cleanup=force_cleanup)
+    if force_cleanup:
+        for obj in objects:
+            if obj.mode != "OBJECT":
+                with context.temp_override(object=obj,active_object=obj):
+                    bpy.ops.object.mode_set(mode="OBJECT")
     outline_tokens = {obj.get("sora_outline_owner") for obj in objects if obj.get("sora_outline_owner")}
     data_blocks = {obj.data for obj in objects if obj.data}
     for obj in objects:

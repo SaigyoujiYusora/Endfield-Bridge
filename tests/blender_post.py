@@ -36,6 +36,9 @@ try:
     groups.append(user)
     user.interface.new_socket(name='Image', in_out='OUTPUT', socket_type='NodeSocketColor')
     render = user.nodes.new('CompositorNodeRLayers')
+    # The shared fixture renders whichever scene evaluates it. Do not serialize
+    # the user's active scene/assets as an accidental library dependency.
+    render.scene = None
     output = user.nodes.new('NodeGroupOutput')
     user.links.new(render.outputs['Image'], output.inputs['Image'])
     user['user_sentinel'] = 'Do not rewrite this graph'
@@ -62,7 +65,8 @@ try:
     stage = next(n for n in first_tree.nodes if getattr(n, 'node_tree', None)
                  and n.node_tree.get('endf_npr_source_group') == 'Ruri Endfield Post')
     assert len(stage.node_tree.nodes) == 47, 'Unexpected bundled post group'
-    assert any(getattr(n, 'node_tree', None) == user for n in first_tree.nodes)
+    assert any(n.bl_idname == 'CompositorNodeRLayers' for n in first_tree.nodes)
+    assert not any(getattr(n, 'node_tree', None) == user for n in first_tree.nodes)
     assert view(first)[:4] == ('Standard', 'None', 0.0, 1.0)
     if hasattr(first.render, 'compositor_device'):
         assert first.render.compositor_device == 'GPU'

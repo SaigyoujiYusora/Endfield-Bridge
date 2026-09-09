@@ -7,7 +7,10 @@ call Stack.install/uninstall here: those functions own a global scene-tree name.
 The game post includes its own tone mapping. Standard/None avoids a second
 display tone map; exposure=0 and gamma=1 reproduce its reference input/output
 contract. All four original view settings are restored on disable. Existing
-user compositors are evaluated as an untouched nested source before game post.
+user compositors are copied privately with Render Layers kept at scene level.
+Top-level edits and animation made while enabled remain in a private compositor
+on disable; unchanged graphs restore the original shared ID. Nested user groups
+keep their existing Blender sharing semantics. Nested Render Layers is rejected.
 """
 import json
 import uuid
@@ -63,50 +66,53 @@ def _restore_settings(scene, saved):
 
 def _build(scene, previous):
     from .ruri_adapter import stacks
+    from .post_graph import build
     stack = next(stack for stack in stacks() if stack.post is not None)
     group = stack.group(stack.post['group'])
     if group.library is not None:
         raise RuntimeError('ENDF NPR-Shader post requires its local bundled node group')
-    tree = bpy.data.node_groups.new('ENDF NPR-Shader Post Scene ' + uuid.uuid4().hex[:8], 'CompositorNodeTree')
-    try:
-        tree[OWNER] = scene
-        tree.interface.new_socket(name='Image', in_out='OUTPUT', socket_type='NodeSocketColor')
-        if previous is not None:
-            source = tree.nodes.new('CompositorNodeGroup')
-            source.node_tree = previous
-            source.label = 'Previous scene compositor (preserved)'
-            color = source.outputs.get('Image')
-            if color is None:
-                color = next((socket for socket in source.outputs if socket.type == 'RGBA'), None)
-            if color is None:
-                raise ValueError('Existing compositor needs an Image/color output before ENDF NPR-Shader post can be enabled')
-        else:
-            source = tree.nodes.new('CompositorNodeRLayers')
-            color = source.outputs['Image']
-        split = tree.nodes.new('CompositorNodeSeparateColor')
-        pack = tree.nodes.new('ShaderNodeCombineXYZ')
-        stage = tree.nodes.new('CompositorNodeGroup')
-        stage.node_tree = group
-        stage.label = 'ENDF NPR-Shader post-processing'
-        unpack = tree.nodes.new('ShaderNodeSeparateXYZ')
-        join = tree.nodes.new('CompositorNodeCombineColor')
-        output = tree.nodes.new('NodeGroupOutput')
-        tree.links.new(color, split.inputs['Image'])
-        for channel, axis in (('Red', 'X'), ('Green', 'Y'), ('Blue', 'Z')):
-            tree.links.new(split.outputs[channel], pack.inputs[axis])
-        tree.links.new(pack.outputs['Vector'], stage.inputs[stack.post['color_in']])
-        tree.links.new(stage.outputs[stack.post['color_out']], unpack.inputs['Vector'])
-        for channel, axis in (('Red', 'X'), ('Green', 'Y'), ('Blue', 'Z')):
-            tree.links.new(unpack.outputs[axis], join.inputs[channel])
-        # Extract alpha from the actual source color, including a user graph.
-        tree.links.new(split.outputs['Alpha'], join.inputs['Alpha'])
-        tree.links.new(join.outputs['Image'], output.inputs['Image'])
-        for index, node in enumerate((source, split, pack, stage, unpack, join, output)):
-            node.location = (index * 190, 0)
-        return tree
-    except Exception:
-        bpy.data.node_groups.remove(tree)
-        raise
+    return build(scene, previous, group, stack.post['color_in'], stack.post['color_out'], OWNER)
+
+
+def _migrate_legacy(scene):
+    """Migrate only the exact unedited v1 wrapper authored by this module."""
+    from .post_graph import REVISION, REVISION_KEY
+    old = scene.get(WRAPPER)
+    if old.get(REVISION_KEY) == REVISION:
+        return old
+    previous = scene.get(PREVIOUS)
+    kinds = ['CompositorNodeGroup', 'CompositorNodeSeparateColor', 'ShaderNodeCombineXYZ',
+             'CompositorNodeGroup', 'ShaderNodeSeparateXYZ', 'CompositorNodeCombineColor',
+             'NodeGroupOutput']
+    nodes = list(old.nodes)
+    expected = [('Group','Image','Separate Color','Image'),
+        ('Separate Color','Red','Combine XYZ','X'),('Separate Color','Green','Combine XYZ','Y'),
+        ('Separate Color','Blue','Combine XYZ','Z'),('Combine XYZ','Vector','Group.001','color'),
+        ('Group.001','ret','Separate XYZ','Vector'),('Separate XYZ','X','Combine Color','Red'),
+        ('Separate XYZ','Y','Combine Color','Green'),('Separate XYZ','Z','Combine Color','Blue'),
+        ('Separate Color','Alpha','Combine Color','Alpha'),('Combine Color','Image','Group Output','Image')]
+    if previous is None:
+        kinds[0] = 'CompositorNodeRLayers'
+        expected[0] = ('Render Layers','Image','Separate Color','Image')
+    actual = [(l.from_node.name,l.from_socket.name,l.to_node.name,l.to_socket.name) for l in old.links]
+    labels = ['Previous scene compositor (preserved)' if previous is not None else '',
+              '', '', 'ENDF NPR-Shader post-processing', '', '', '']
+    valid = (old.animation_data is None and len(nodes) == 7
+        and [n.bl_idname for n in nodes] == kinds
+        and (previous is None or nodes[0].node_tree == previous)
+        and sorted(actual) == sorted(expected)
+        and all(not n.mute and tuple(n.location) == (i*190,0) for i,n in enumerate(nodes))
+        and [n.label for n in nodes] == labels
+        and nodes[3].node_tree.get('endf_npr_source_group') == 'Ruri Endfield Post'
+        and set(old.keys()) == {OWNER})
+    if not valid:
+        raise ValueError('Existing legacy ENDF compositor wrapper was edited or is unsupported; preserved for explicit migration')
+    new = _build(scene, previous)
+    scene[WRAPPER] = new
+    scene.compositing_node_group = new
+    if old.users == 0:
+        bpy.data.node_groups.remove(old)
+    return new
 
 
 def _restore_viewport(screen):
@@ -177,8 +183,9 @@ def enable(scene, context=None):
     if scene.library is not None:
         raise ValueError('Enable ENDF NPR-Shader post on a local scene')
     if installed(scene):
+        tree = _migrate_legacy(scene)
         sync_viewport(context)
-        return scene.get(WRAPPER)
+        return tree
     old_wrapper = scene.get(WRAPPER)
     previous = scene.compositing_node_group
     # A duplicated scene inherits ID pointers. Unwrap its inherited wrapper
@@ -224,21 +231,32 @@ def enable(scene, context=None):
 def disable(scene):
     saved = json.loads(scene[STATE]) if STATE in scene else None
     tree = scene.get(WRAPPER)
+    retained = False
+    if tree is not None and scene.compositing_node_group == tree:
+        from .post_graph import REVISION_KEY, REVISION, upstream_changed, retain_edited_upstream, NOTICE
+        if tree.get(REVISION_KEY) == REVISION and upstream_changed(tree):
+            # Do this preflight before restoring viewport/settings or metadata.
+            # A changed upstream belongs to this scene, never the shared source.
+            retain_edited_upstream(tree)
+            retained = True
+            scene[NOTICE] = 'Kept your edited private compositor; the original shared compositor is unchanged.'
     for screen in list(dict(scene.get(SCREENS, {})).values()):
         if screen is not None and screen.get(VIEW_OWNER) == scene:
             _restore_viewport(screen)
     # Restore only if we still own the active assignment. If a user replaced
     # the compositor, retain that graph and its current display settings.
     if tree is not None and scene.compositing_node_group == tree:
-        scene.compositing_node_group = scene.get(PREVIOUS)
+        scene.compositing_node_group = tree if retained else scene.get(PREVIOUS)
         if saved is not None:
             _restore_settings(scene, saved)
     for key in (STATE, PREVIOUS, WRAPPER, SCREENS, SAVED_ACTIVE):
         if key in scene:
             del scene[key]
     # Never unlink/delete another scene's wrapper, or a user-adopted group.
-    if tree is not None and tree.get(OWNER) == scene and tree.users == 0:
-        bpy.data.node_groups.remove(tree)
+    if tree is not None and tree.get(OWNER) == scene:
+        from .post_graph import dispose, unused
+        if unused(tree):
+            dispose(tree)
     return saved is not None
 
 
@@ -277,6 +295,13 @@ def _restore_loaded_post():
         if current != tree and (current is None or current.name not in upstream_names):
             continue  # Never take over an unrelated user compositor.
         scene.compositing_node_group = tree
+        from .post_graph import REVISION_KEY, REVISION, NOTICE
+        if tree.get(REVISION_KEY) != REVISION:
+            try:
+                tree = _migrate_legacy(scene)
+            except ValueError as exc:
+                scene[NOTICE] = str(exc)
+                continue
         scene.render.use_compositing = True
         scene.view_settings.view_transform = 'Standard'
         scene.view_settings.look = 'None'

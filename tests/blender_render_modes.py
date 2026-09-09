@@ -32,7 +32,11 @@ def geometry():
 baseline=geometry()
 other={(o.name,i):m.as_pointer() if m else None for o in bpy.context.scene.objects if o.type=='MESH' and o.get('sora_instance')!=collection['sora_instance'] for i,m in enumerate(o.data.materials)}
 scene=bpy.context.scene
-post=(scene.view_settings.view_transform,scene.view_settings.exposure,scene.view_settings.gamma,scene.use_nodes,scene.node_tree.as_pointer() if scene.node_tree else None)
+def post_state():
+    tree=scene.compositing_node_group
+    return (scene.view_settings.view_transform,scene.view_settings.look,scene.view_settings.exposure,
+            scene.view_settings.gamma,scene.render.use_compositing,tree.as_pointer() if tree else None)
+post=post_state()
 original=collection[modes.MODE];alternate='BASIC' if original=='RURI' else 'RURI'
 report={'samples':[]}
 try:
@@ -42,6 +46,7 @@ try:
         next(job);next(job);job.close()
         assert collection[modes.MODE]==original and geometry()==baseline
         report['cancel_counts']={'before':before,'after':(len(bpy.data.materials),len(bpy.data.images),len(bpy.data.node_groups))}
+        assert report['cancel_counts']['before']==report['cancel_counts']['after'], 'Cancelled switch leaked owned data'
     material_ids={}
     for mode in (alternate,original,alternate,original):
         exhaust(modes.switch_steps(bpy.context,collection,mode,document))
@@ -50,7 +55,7 @@ try:
         if mode in material_ids:assert ids==material_ids[mode],'Cached materials were rebuilt'
         material_ids[mode]=ids
         assert other=={(o.name,i):m.as_pointer() if m else None for o in bpy.context.scene.objects if o.type=='MESH' and o.get('sora_instance')!=collection['sora_instance'] for i,m in enumerate(o.data.materials)}
-        assert post==(scene.view_settings.view_transform,scene.view_settings.exposure,scene.view_settings.gamma,scene.use_nodes,scene.node_tree.as_pointer() if scene.node_tree else None)
+        assert post==post_state(), 'Instance switch changed scene compositor or color management'
         report['samples'].append({'mode':mode,'geometry':baseline,'materials':len(ids),'data_counts':(len(bpy.data.materials),len(bpy.data.images),len(bpy.data.node_groups))})
     report['ok']=True
 finally:

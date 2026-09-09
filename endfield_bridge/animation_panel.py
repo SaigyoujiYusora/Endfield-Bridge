@@ -11,6 +11,9 @@ from .tasks import TaskOperator
 
 def target(context):
     obj = context.object
+    if obj and obj.get('sora_owner_collection'):
+        owner = obj['sora_owner_collection']
+        obj = next((o for o in owner.objects if o.type == 'ARMATURE' and not o.get('sora_display_source')), None)
     rig = obj if obj and obj.type == 'ARMATURE' else obj.find_armature() if obj and obj.type == 'MESH' else None
     return rig if rig and rig.get('sora_instance') and rig.get('sora_asset') and rig.get('sora_database') else None
 
