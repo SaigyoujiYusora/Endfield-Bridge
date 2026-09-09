@@ -23,6 +23,8 @@ def create_scene_steps(context, document, material_mode=None):
         from . import ruri_adapter
     if any(len(bone["name"].encode("utf-8")) > 63 for bone in document["bones"]):
         raise ValueError("Bone names must fit Blender's 63-byte UTF-8 limit")
+    from .scene_nodes import validate_nodes, create_nodes_steps, bind_mesh_node
+    node_records = validate_nodes(document)
     token = uuid.uuid4().hex
     previous_active = context.view_layer.objects.active
     previous_selected = list(context.selected_objects)
@@ -44,6 +46,7 @@ def create_scene_steps(context, document, material_mode=None):
         collection = bpy.data.collections.new(document["name"])
         collection["sora_instance"] = token
         context.scene.collection.children.link(collection)
+        nodes = yield from create_nodes_steps(collection, token, node_records, created)
         image_map = {}
         textures = document.get("textures") or []
         for index, texture in enumerate(textures):
@@ -173,6 +176,7 @@ def create_scene_steps(context, document, material_mode=None):
                 obj.parent = rig
             elif shader_frame:
                 obj.rotation_euler.z = math.pi
+            bind_mesh_node(obj, source, nodes, shader_frame)
             if source["shapes"]:
                 obj.shape_key_add(name="Basis")
                 for shape_index, source_shape in enumerate(source["shapes"]):
