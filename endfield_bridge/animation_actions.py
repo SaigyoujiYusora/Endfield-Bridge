@@ -350,6 +350,8 @@ def apply_clip(context, rig, clip, bone_names, bone_sources=None, keep_face_cont
 
 
 def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_face_controls=False):
+    if rig is not None and rig.get('sora_pose_resume'):
+        raise ValueError('Restore suspended animation before loading another clip')
     if context.mode not in {'OBJECT', 'POSE'}:
         raise ValueError('Switch to Object or Pose Mode before loading an animation')
     if rig is None or rig.type != 'ARMATURE' or not rig.get('sora_instance'):

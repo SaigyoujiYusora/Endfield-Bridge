@@ -180,6 +180,7 @@ class SORA_OT_search(TaskOperator, bpy.types.Operator):
                 settings.selected = 0 if settings.assets else -1
                 settings.offset = offset
                 settings.total = result['total']
+                settings.source_details = False
                 settings.status = f"{result['total']} matches"
             return tasks.start(self, context, 'search', {'path':database, 'root':root,
                 'query':settings.query, 'kind':settings.kind if settings.category == 'PEOPLE' else 'weapon',
@@ -216,6 +217,12 @@ class SORA_OT_import(TaskOperator, bpy.types.Operator):
             for obj in collection.objects:
                 obj['sora_asset'] = identity
                 obj['sora_database'] = database
+            imported = rig or next((obj for obj in collection.objects if obj.type == 'MESH'), None)
+            if imported is not None:
+                for selected in list(context.selected_objects):
+                    selected.select_set(False)
+                imported.select_set(True)
+                context.view_layer.objects.active = imported
             settings.status = 'Imported ' + document['name']
             settings.clip = document['clips'][0]['name'] if document['clips'] else ''
         try:
@@ -230,13 +237,15 @@ class SORA_OT_instance(bpy.types.Operator):
     bl_idname = 'sora.select_instance'
     bl_label = 'Next imported instance'
     def execute(self, context):
-        roots = [c for c in bpy.data.collections if c.get('sora_instance') and c.objects]
+        roots = [c for c in bpy.data.collections if c.get('sora_instance')
+                 and any(o.name in context.view_layer.objects and o.visible_get(view_layer=context.view_layer) for o in c.objects)]
         if not roots:
             return {'CANCELLED'}
         current = context.object.get('sora_instance') if context.object else None
         index = next((i for i, c in enumerate(roots) if c.get('sora_instance') == current), -1)
         collection = roots[(index + 1) % len(roots)]
-        obj = next((o for o in collection.objects if o.type == 'ARMATURE'), collection.objects[0])
+        visible = [o for o in collection.objects if o.name in context.view_layer.objects and o.visible_get(view_layer=context.view_layer)]
+        obj = next((o for o in visible if o.type == 'ARMATURE' and not o.get('sora_display_source')), visible[0])
         if context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
         for selected in context.selected_objects:
@@ -287,6 +296,43 @@ class SORA_OT_clip(TaskOperator, bpy.types.Operator):
             return {"CANCELLED"}
 
 
+def wrapped_label(layout, value, context):
+    """Wrap text using display-cell width; never discard the error payload."""
+    import unicodedata
+    width = max(16, int((context.region.width / context.preferences.system.ui_scale - 42) / 7))
+    for paragraph in str(value or '').splitlines():
+        line, cells = '', 0
+        for char in paragraph:
+            size = 2 if unicodedata.east_asian_width(char) in {'W', 'F'} else 1
+            if cells + size > width and line:
+                layout.label(text=line)
+                line, cells = '', 0
+            line += char
+            cells += size
+        if line:
+            layout.label(text=line)
+
+
+def instance_name(context):
+    obj = context.object
+    token = obj.get('sora_instance') if obj else None
+    if not token:
+        return 'No imported instance selected'
+    collection = next((c for c in obj.users_collection if c.get('sora_instance') == token), None)
+    if collection is None:
+        return 'Imported instance collection unavailable'
+    rig = next((o for o in collection.objects if o.type == 'ARMATURE'), None)
+    return rig.name if rig else collection.name
+
+
+class SORA_OT_copy_diagnostics(bpy.types.Operator):
+    bl_idname = 'sora.copy_diagnostics'
+    bl_label = 'Copy complete error details'
+    def execute(self, context):
+        context.window_manager.clipboard = context.scene.sora.task_error or context.scene.sora.status
+        return {'FINISHED'}
+
+
 class SORA_PT_panel(bpy.types.Panel):
     bl_label = "ENDF2Blend"
     bl_idname = "SORA_PT_panel"
@@ -324,11 +370,11 @@ class SORA_PT_panel(bpy.types.Panel):
         box = layout.box()
         box.enabled = not settings.task_running
         box.label(text='资源库')
-        box.prop(settings, 'category', expand=True)
+        box.row(align=True).prop(settings, 'category', expand=True)
         if settings.category == 'SCENES':
             box.label(text='区域 / 过场：占位，尚未支持', icon='INFO')
         else:
-            if settings.category == 'PEOPLE': box.prop(settings, 'kind', expand=True)
+            if settings.category == 'PEOPLE': box.row(align=True).prop(settings, 'kind', expand=True)
             else: box.label(text='通用武器（按后端支持范围）')
             box.prop(settings, 'query')
             box.operator('sora.search')
@@ -341,18 +387,18 @@ class SORA_PT_panel(bpy.types.Panel):
             following.operator('sora.search', text='', icon='TRIA_RIGHT').direction = 1
             if 0 <= settings.selected < len(settings.assets):
                 asset = settings.assets[settings.selected]
-                box.label(text=asset.detail)
-                box.label(text=asset.reason)
+                wrapped_label(box, asset.detail, context)
+                wrapped_label(box, asset.reason, context)
             box.operator('sora.import_asset')
             reason = import_reason(context)
-            if reason: box.label(text=reason, icon='INFO')
+            if reason: wrapped_label(box, reason, context)
         box = layout.box()
-        box.label(text='当前实例: ' + (context.object.name if context.object and context.object.get('sora_instance') else '未选择'))
+        wrapped_label(box, '当前实例: ' + instance_name(context), context)
         buttons = box.column(align=True)
         buttons.enabled = not settings.task_running
         buttons.operator('sora.select_instance')
         buttons.operator('sora.remove_import')
-        box.prop(settings, 'function_page', expand=True)
+        box.row(align=True).prop(settings, 'function_page', expand=True)
         box = box.column()
         box.enabled = not settings.task_running
         if settings.function_page == 'ANIMATION':
@@ -364,7 +410,8 @@ class SORA_PT_panel(bpy.types.Panel):
             face_controls.draw(box, context)
         elif settings.function_page == 'POSE':
             box.operator('sora.stick_display')
-            box.label(text='Pose tools require verified native mapping', icon='INFO')
+            from . import pose_controls
+            pose_controls.draw(box, context)
         elif settings.function_page == 'MATERIAL':
             box.prop(settings, 'material_mode', text='New imports')
             box.prop(settings, 'npr_post_processing')
@@ -372,14 +419,16 @@ class SORA_PT_panel(bpy.types.Panel):
         else:
             box.label(text='专用装备归属于角色；通用武器独立管理')
             box.label(text='Equipment binding support pending', icon='INFO')
-        layout.label(text=settings.status)
+        wrapped_label(layout, 'Task failed; open error details' if settings.task_error else settings.status, context)
         if settings.task_error:
             layout.prop(settings, 'diagnostics')
             if settings.diagnostics:
-                layout.label(text=settings.task_error)
+                details = layout.box()
+                details.operator('sora.copy_diagnostics', icon='COPYDOWN')
+                wrapped_label(details, settings.task_error, context)
 
 
-CLASSES = (SORA_Preferences, SORA_AssetRow, SORA_Settings, SORA_OT_check, SORA_OT_cancel, SORA_OT_database, SORA_OT_instance, SORA_OT_stick, SORA_OT_search, SORA_OT_import, SORA_OT_remove, SORA_OT_clip, SORA_PT_panel)
+CLASSES = (SORA_Preferences, SORA_AssetRow, SORA_Settings, SORA_OT_check, SORA_OT_cancel, SORA_OT_database, SORA_OT_instance, SORA_OT_stick, SORA_OT_search, SORA_OT_import, SORA_OT_remove, SORA_OT_clip, SORA_OT_copy_diagnostics, SORA_PT_panel)
 
 
 @persistent
@@ -396,7 +445,7 @@ def _migrate_sources_timer():
 
 
 def register():
-    from . import post, ruri_adapter, material_panel, face_controls, animation_panel
+    from . import post, ruri_adapter, material_panel, face_controls, animation_panel, pose_controls
     from .registration import RegistrationTransaction
     transaction = RegistrationTransaction(bpy, __package__, (
         (bpy.types.Scene, 'sora'), (bpy.types.Scene, 'sora_animation'),
@@ -410,6 +459,7 @@ def register():
         material_panel.register()
         face_controls.register()
         animation_panel.register()
+        pose_controls.register()
         if migrate_saved_sources not in bpy.app.handlers.load_post:
             bpy.app.handlers.load_post.append(migrate_saved_sources)
         if not bpy.app.timers.is_registered(_migrate_sources_timer):
@@ -427,6 +477,8 @@ def unregister():
     if migrate_saved_sources in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(migrate_saved_sources)
     tasks.shutdown()
+    from . import pose_controls
+    pose_controls.unregister()
     from . import animation_panel
     animation_panel.unregister()
     from . import face_controls

@@ -65,9 +65,82 @@ def stacks():
                 validate_transparent_graph(mat)
                 # provider() writes parameters before returning the material.
                 # Record the actual graph replacement before those callbacks.
-                mat['endf_npr_transparent_base'] = True
+                from .npc_customization import TRANSPARENT_STAMP
+                mat['endf_npr_transparent_base'] = TRANSPARENT_STAMP
+
+            def provider(self, builder, props):
+                # Reject destructive vendor cache upgrades before any loading,
+                # rename, remap or deletion. Existing scenes require explicit migration.
+                self._check_existing_templates()
+                self._pending_shader_ref = dict(props.shader_ref or {})
+                self._pending_shader_id = dict(getattr(props, 'shader_id', None) or {})
+                try:
+                    return super().provider(builder, props)
+                finally:
+                    self._pending_shader_ref = None
+                    self._pending_shader_id = None
+
+            def _check_existing_templates(self, groups_only=False):
+                for mat in bpy.data.materials:
+                    if not groups_only and mat.name.startswith(self.TEMPLATE_MAT) and (
+                            mat.get(self.STAMP_KEY) != self.STAMP + ':transparent-basemap-v2'
+                            or mat.node_tree is None):
+                        raise RuntimeError('Existing NPR template requires explicit migration; preserved: ' + mat.name)
+                for group in bpy.data.node_groups:
+                    source = group.get('endf_npr_source_group') or group.name
+                    if source in self.group_names and not group.get('endf_npr_private_clone'):
+                        if group.library is not None or group.get('ruri_stamp') != self.STAMP:
+                            raise RuntimeError('Existing NPR group requires explicit migration; preserved: ' + group.name)
+
+            def panel_write(self, mat, row, value):
+                from .npc_customization import ENABLE, validate_transparent_graph, validate_shader_identity
+                name = row['name']
+                floats = dict(mat.get('ruri_uber_floats') or {})
+                if name == '_SurfaceType' and float(value) != float(floats.get(name, 0)):
+                    raise ValueError('SurfaceType changes require a new material import; current material is preserved')
+                if mat.get('endf_npr_transparent_base'):
+                    validate_transparent_graph(mat)
+                    if name == ENABLE and float(value) > 0.5:
+                        raise ValueError('Enabled customization is unsupported on the transparent BaseMap path')
+                elif name == ENABLE and float(value) > 0.5:
+                    validate_shader_identity(mat)
+                # Preflight the current contract before vendor mutates snapshots.
+                from .npc_customization import sync
+                sync(mat)
+                old_colors = {k: list(v) for k, v in dict(mat.get('ruri_uber_colors') or {}).items()}
+                sockets = []
+                for node in [*self._panel_insts(mat), *self._panel_vertex_nodes(mat)]:
+                    for socket in node.inputs:
+                        if hasattr(socket, 'default_value'):
+                            v = socket.default_value
+                            sockets.append((socket, v if isinstance(v, (int, float, str)) else tuple(v)))
+                col = mat.get('ruri_param_col')
+                old_column = self._mat_mirror()[:, int(col), :].copy() if col is not None else None
+                try:
+                    return super().panel_write(mat, row, value)
+                except Exception:
+                    mat['ruri_uber_floats'] = floats
+                    mat['ruri_uber_colors'] = old_colors
+                    for socket, old in sockets:
+                        socket.default_value = old
+                    if old_column is not None:
+                        self._mat_mirror()[:, int(col), :] = old_column
+                        self._param_flush_soon()
+                    if mat.get('endf_npr_transparent_base'):
+                        from .npc_customization import sync_transparent
+                        sync_transparent(mat)
+                    raise
 
             def _param_write(self, mat):
+                pending = getattr(self, '_pending_shader_ref', None)
+                if pending is not None:
+                    mat['sora_native_shader_ref'] = json.dumps(pending, sort_keys=True)
+                resolved = getattr(self, '_pending_shader_id', None)
+                if resolved is not None:
+                    mat['sora_native_shader_id'] = json.dumps(resolved, sort_keys=True)
+                from .npc_customization import sync_transparent
+                if mat.get('endf_npr_transparent_base'):
+                    sync_transparent(mat)
                 column = super()._param_write(mat)
                 from .cycles_uniforms import sync
                 sync(self, mat, column)
@@ -87,6 +160,7 @@ def stacks():
                         sync_customization(mat)
 
             def group(self, name):
+                self._check_existing_templates(groups_only=True)
                 existing = next((group for group in bpy.data.node_groups
                     if group.library is None and group.get('endf_npr_source_group') == name
                     and not group.get('sora_instance') and not group.get('endf_npr_private_clone')
@@ -166,6 +240,7 @@ def build_material(records, images, token):
     bindings = descriptor.get('textures') or {}
     props = SimpleNamespace(
         name=f"{source['name']} [{token[:8]}]", shader_ref=native.get('shaderSourceRef') or {},
+        shader_id=native.get('shaderId') or {},
         floats={**descriptor.get('ints', {}), **descriptor.get('floats', {})},
         colors=descriptor.get('colors', {}),
         textures={k: v['textureId'] for k, v in bindings.items() if v.get('textureId')},
@@ -195,6 +270,7 @@ def build_material(records, images, token):
             base_id = props.textures[stack.ST_SLOT]
             builder._load_image = lambda identity: image_view if identity == base_id else images.get(identity)
         material = None
+        prior_names = [(item, item.name) for item in bpy.data.materials]
         before_materials = {item.as_pointer() for item in bpy.data.materials}
         before_groups = {item.as_pointer() for item in bpy.data.node_groups}
         try:
@@ -203,6 +279,8 @@ def build_material(records, images, token):
                 raise RuntimeError('ENDF NPR-Shader provider declined its resolved shader')
             material['sora_instance'] = token
             material['sora_material_descriptor'] = json.dumps(descriptor)
+            material['sora_native_shader_ref'] = json.dumps(props.shader_ref, sort_keys=True)
+            material['sora_native_shader_id'] = json.dumps(props.shader_id, sort_keys=True)
             material['sora_render_pipeline'] = 'ENDF NPR-Shader'
             if transparent_base and original_base is not None:
                 from .npc_customization import validate_transparent_graph
@@ -218,6 +296,8 @@ def build_material(records, images, token):
             # Shared templates have fake users and survive. Existing unused
             # user materials are protected by the pre-provider snapshot.
             _discard_failed_materials(before_materials, before_groups)
+            for existing, name in prior_names:
+                existing.name = name
             if image_view is not None and image_view.users == 0:
                 bpy.data.images.remove(image_view)
             raise

@@ -15,23 +15,70 @@ COLORS = ('_CustomizeBaseColor', '_CustomizeBaseTintColor', '_CustomizeAddTintCo
 MARKER = 'endf_npc_customization'
 
 
+TRANSPARENT_STAMP = 'basemap-links-v2'
+VERIFIED_SHADER = ('CAB-8e64a7d61483ea16539b04f304be9ed7', '-7822190029627442914')
+
+
 def validate_transparent_graph(material):
-    """Validate the flat BaseMap graph before excluding Standard s1 consumers."""
-    nodes = list(material.node_tree.nodes) if material.node_tree else []
-    kinds = {node.type for node in nodes}
-    if ('GROUP' in kinds
-            or not {'BSDF_TRANSPARENT', 'EMISSION', 'MIX_SHADER', 'TEX_IMAGE'}.issubset(kinds)):
-        raise RuntimeError('ENDF NPR-Shader transparent BaseMap graph contract changed: ' + material.name)
-    products = [node for node in nodes if node.bl_idname == 'ShaderNodeMixRGB'
-        and node.blend_type == 'MULTIPLY' and not node.use_clamp
-        and not node.inputs[0].is_linked and node.inputs[0].default_value == 1.0
-        and len(node.inputs[1].links) == 1
-        and node.inputs[1].links[0].from_node.type == 'TEX_IMAGE'
-        and node.inputs[1].links[0].from_socket.name == 'Color'
-        and not node.inputs[2].is_linked]
-    if len(products) != 1 or not any(link.to_node.type == 'EMISSION'
-            and link.to_socket.name == 'Color' for link in products[0].outputs['Color'].links):
-        raise RuntimeError('ENDF NPR-Shader transparent albedo contract changed: ' + material.name)
+    """Closed, socket-identity contract for the provider's flat BaseMap graph."""
+    def fail():
+        raise RuntimeError('ENDF NPR-Shader transparent graph contract changed: ' + material.name)
+    tree = material.node_tree
+    if tree is None or material.surface_render_method != 'BLENDED':
+        fail()
+    kinds = ('TEX_COORD', 'MAPPING', 'TEX_IMAGE', 'MIX_RGB', 'EMISSION',
+             'MATH', 'BSDF_TRANSPARENT', 'MIX_SHADER', 'OUTPUT_MATERIAL')
+    nodes = list(tree.nodes)
+    if len(nodes) != len(kinds) or any(sum(n.type == k for n in nodes) != 1 for k in kinds):
+        fail()
+    uv, mapping, image, tint, emission, alpha, transparent, mix, output = (
+        next(n for n in nodes if n.type == k) for k in kinds)
+    if (image.label != '_BaseMap' or image.image is None
+            or tint.blend_type != 'MULTIPLY' or tint.use_clamp
+            or tint.inputs[0].default_value != 1.0
+            or alpha.operation != 'MULTIPLY' or alpha.use_clamp
+            or mapping.vector_type != 'POINT'):
+        fail()
+    pairs = [(uv.outputs['UV'], mapping.inputs['Vector']),
+             (mapping.outputs['Vector'], image.inputs['Vector']),
+             (image.outputs['Color'], tint.inputs[1]),
+             (tint.outputs['Color'], emission.inputs['Color']),
+             (image.outputs['Alpha'], alpha.inputs[0]),
+             (alpha.outputs[0], mix.inputs[0]),
+             (transparent.outputs[0], mix.inputs[1]),
+             (emission.outputs[0], mix.inputs[2]),
+             (mix.outputs[0], output.inputs['Surface'])]
+    if len(tree.links) != len(pairs) or any(not any(
+            link.from_socket == source and link.to_socket == target
+            for link in tree.links) for source, target in pairs):
+        fail()
+    marker = material.get('endf_npr_transparent_base')
+    if marker not in (None, True, TRANSPARENT_STAMP):
+        fail()
+    return tint, alpha
+
+
+def sync_transparent(material):
+    tint, alpha = validate_transparent_graph(material)
+    color = list(dict(material.get('ruri_uber_colors') or {}).get('_BaseColor', (1, 1, 1, 1)))
+    if len(color) != 4 or not all(math.isfinite(float(x)) for x in color):
+        raise ValueError('Transparent BaseColor must contain four finite values')
+    tint.inputs[2].default_value = color
+    alpha.inputs[1].default_value = color[3]
+
+
+def validate_shader_identity(material):
+    import json
+    # shaderSourceRef.fileId is a relative dependency index, not a CAB name.
+    # Formula provenance is keyed by the resolved shaderId (CAB + pathId).
+    raw = material.get('sora_native_shader_id')
+    if raw is None:
+        descriptor = json.loads(material.get('sora_material_descriptor', '{}'))
+        ref = (descriptor.get('source') or {}).get('shaderId') or {}
+    else:
+        ref = json.loads(raw)
+    if (str(ref.get('cab')), str(ref.get('pathId'))) != VERIFIED_SHADER:
+        raise RuntimeError('NPC customization: native shader identity has no verified formula contract: ' + material.name)
 
 
 def _source(socket, name):
@@ -120,6 +167,7 @@ def sync(material):
         if enable > 0.5:
             raise RuntimeError('NPC customization: enabled customization is unsupported on the transparent BaseMap path: ' + material.name)
         return
+    validate_shader_identity(material)
     nodes = [n for n in material.node_tree.nodes if n.type == 'GROUP' and n.node_tree
              and n.get('ruri_inst') == 1 and n.inputs.get('F0_BaseMap') is not None]
     if len(nodes) != 1:

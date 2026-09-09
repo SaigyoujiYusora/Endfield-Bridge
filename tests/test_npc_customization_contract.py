@@ -27,20 +27,37 @@ class Datablocks(list):
 class Material(dict):
     name = 'Character transparent cloth'
     users = 0
+    surface_render_method = 'BLENDED'
 
     def as_pointer(self):
         return id(self)
 
 
+class Sockets(list):
+    def __getitem__(self, key):
+        return next(x for x in self if x.name == key) if isinstance(key, str) else super().__getitem__(key)
+
+
 def flat_graph():
-    texture = Node('TEX_IMAGE')
-    emission = Node('EMISSION')
-    source = NS(from_node=texture, from_socket=NS(name='Color'))
-    target = NS(to_node=emission, to_socket=NS(name='Color'))
-    product = Node('MIX_RGB', bl_idname='ShaderNodeMixRGB', blend_type='MULTIPLY', use_clamp=False,
-        inputs=[NS(is_linked=False, default_value=1.0), NS(links=[source]), NS(is_linked=False)],
-        outputs={'Color': NS(links=[target])})
-    return NS(nodes=[texture, emission, product, Node('BSDF_TRANSPARENT'), Node('MIX_SHADER')])
+    kinds = ('TEX_COORD', 'MAPPING', 'TEX_IMAGE', 'MIX_RGB', 'EMISSION',
+             'MATH', 'BSDF_TRANSPARENT', 'MIX_SHADER', 'OUTPUT_MATERIAL')
+    inputs = [[], ['Vector', 'Scale', 'Location'], ['Vector'], ['Fac', 'Color1', 'Color2'],
+              ['Color'], ['Value', 'Value2'], [], ['Fac', 'Shader1', 'Shader2'], ['Surface']]
+    outputs = [['UV'], ['Vector'], ['Color', 'Alpha'], ['Color'], ['Emission'], ['Value'], ['BSDF'], ['Shader'], []]
+    nodes = [Node(k, inputs=Sockets(NS(name=x, default_value=1.0, links=[]) for x in ins),
+                  outputs=Sockets(NS(name=x, links=[]) for x in outs)) for k, ins, outs in zip(kinds, inputs, outputs)]
+    uv, mapping, image, tint, emission, alpha, transparent, mix, output = nodes
+    image.label = '_BaseMap'
+    image.image = NS(name='BaseMap')
+    mapping.vector_type = 'POINT'
+    tint.blend_type = alpha.operation = 'MULTIPLY'
+    tint.use_clamp = alpha.use_clamp = False
+    pairs = [(uv.outputs[0], mapping.inputs[0]), (mapping.outputs[0], image.inputs[0]),
+             (image.outputs[0], tint.inputs[1]), (tint.outputs[0], emission.inputs[0]),
+             (image.outputs[1], alpha.inputs[0]), (alpha.outputs[0], mix.inputs[0]),
+             (transparent.outputs[0], mix.inputs[1]), (emission.outputs[0], mix.inputs[2]),
+             (mix.outputs[0], output.inputs[0])]
+    return NS(nodes=nodes, links=[NS(from_socket=a, to_socket=b) for a, b in pairs])
 
 
 def load_method(path, name):
@@ -65,6 +82,8 @@ class Contracts(unittest.TestCase):
     def material(self, enable=0.0, transparent=True):
         mat = Material(ruri_uber_part='Standard', ruri_uber_floats={self.npc.ENABLE: enable},
             ruri_uber_colors={name: [1, 1, 1, 1] for name in self.npc.COLORS})
+        mat['sora_native_shader_ref'] = '{"fileId": 1, "pathId": "-7822190029627442914"}'
+        mat['sora_native_shader_id'] = '{"cab": "CAB-8e64a7d61483ea16539b04f304be9ed7", "pathId": "-7822190029627442914"}'
         mat.node_tree = flat_graph()
         if transparent:
             mat['endf_npr_transparent_base'] = True
@@ -89,9 +108,41 @@ class Contracts(unittest.TestCase):
 
     def test_wrong_albedo_does_not_pass_node_type_check(self):
         mat = self.material()
-        mat.node_tree.nodes[2].blend_type = 'ADD'
-        with self.assertRaisesRegex(RuntimeError, 'albedo contract changed'):
+        mat.node_tree.nodes[3].blend_type = 'ADD'
+        with self.assertRaisesRegex(RuntimeError, 'graph contract changed'):
             self.npc.sync(mat)
+
+    def test_every_required_link_is_checked(self):
+        for i in range(9):
+            mat = self.material()
+            del mat.node_tree.links[i]
+            with self.assertRaisesRegex(RuntimeError, 'graph contract changed'):
+                self.npc.validate_transparent_graph(mat)
+
+    def test_transparent_color_and_alpha_refresh(self):
+        mat = self.material()
+        mat['ruri_uber_colors']['_BaseColor'] = [2.0, 0.3, 0.1, 0.4]
+        self.npc.sync_transparent(mat)
+        tint, alpha = self.npc.validate_transparent_graph(mat)
+        self.assertEqual(tint.inputs[2].default_value, [2.0, 0.3, 0.1, 0.4])
+        self.assertEqual(alpha.inputs[1].default_value, 0.4)
+
+    def test_unknown_shader_reference_rejects_customization(self):
+        mat = self.material(1, transparent=False)
+        mat['sora_native_shader_id'] = '{"cab":"other", "pathId":1}'
+        with self.assertRaisesRegex(RuntimeError, 'native shader identity'):
+            self.npc.sync(mat)
+
+    def test_relative_file_index_does_not_override_resolved_identity(self):
+        mat = self.material(1, transparent=False)
+        mat['sora_native_shader_ref'] = '{"fileId": 17, "pathId": "-7822190029627442914"}'
+        self.npc.validate_shader_identity(mat)
+
+    def test_unresolved_source_reference_is_not_a_cab_identity(self):
+        mat = self.material(1, transparent=False)
+        del mat['sora_native_shader_id']
+        with self.assertRaisesRegex(RuntimeError, 'native shader identity'):
+            self.npc.validate_shader_identity(mat)
 
     def test_nan_enable_is_rejected_even_for_transparent(self):
         with self.assertRaisesRegex(ValueError, 'invalid'):
@@ -150,6 +201,38 @@ class Contracts(unittest.TestCase):
         self.assertIs(stack.provider(NS(options={}), props), mat)
         self.assertTrue(stack.assert_marker)
         self.assertEqual(events, ['flat graph built', 'parameters synchronized'])
+
+    def test_panel_refusals_happen_before_vendor_mutation(self):
+        method = load_method(ROOT / 'ruri_adapter.py', 'panel_write')
+        env = {'__name__': 'contract_package.adapter', '__package__': 'contract_package'}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), '<actual panel guard>', 'exec'), env)
+        mat = self.material()
+        mat['ruri_uber_floats']['_SurfaceType'] = 1.0
+        snapshot = dict(mat['ruri_uber_floats'])
+        for row, value in [({'name': '_SurfaceType'}, 0), ({'name': self.npc.ENABLE}, 1)]:
+            with self.assertRaises(ValueError):
+                env['panel_write'](NS(), mat, row, value)
+            self.assertEqual(dict(mat['ruri_uber_floats']), snapshot)
+
+    def test_stale_cache_preflight_preserves_ids_and_names(self):
+        method = load_method(ROOT / 'ruri_adapter.py', '_check_existing_templates')
+        env = {'bpy': self.bpy}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), '<actual cache guard>', 'exec'), env)
+        stack = NS(TEMPLATE_MAT='Template ', STAMP_KEY='stamp', STAMP='current', group_names=['Source'])
+        old = Material(stamp='old')
+        old.name = 'Template Standard'
+        old.node_tree = flat_graph()
+        self.bpy.data.materials = [old]
+        with self.assertRaisesRegex(RuntimeError, 'explicit migration'):
+            env['_check_existing_templates'](stack)
+        self.assertEqual(old.name, 'Template Standard')
+        self.bpy.data.materials = []
+        group = Material(ruri_stamp='old')
+        group.name, group.library = 'Source', None
+        self.bpy.data.node_groups = [group]
+        with self.assertRaisesRegex(RuntimeError, 'explicit migration'):
+            env['_check_existing_templates'](stack)
+        self.assertEqual(group.name, 'Source')
 
     def test_failed_provider_cleanup_preserves_prior_unused_and_shared_data(self):
         old = Material()

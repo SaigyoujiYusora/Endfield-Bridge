@@ -130,6 +130,53 @@ def run_transparent(document):
             ruri_adapter.rewire_material(stack, material)
         assert before_nodes == [node.as_pointer() for node in material.node_tree.nodes]
         report['checks'].append('transparent graph survives provider, repeated sync and rewire')
+        color_row = {'name': '_BaseColor', 'kind': 'COLOR', 'size': 4}
+        stack.panel_write(material, color_row, [0.25, 0.5, 1.5, 0.375])
+        tint, alpha = npc.validate_transparent_graph(material)
+        assert tuple(tint.inputs[2].default_value) == (0.25, 0.5, 1.5, 0.375)
+        assert alpha.inputs[1].default_value == 0.375
+        report['checks'].append('changed transparent HDR RGB and alpha reach literal sockets')
+        old_floats = dict(material['ruri_uber_floats'])
+        col = int(material['ruri_param_col'])
+        old_column = stack._mat_mirror()[:, col, :].copy()
+        for row, value in [({'name': '_SurfaceType', 'kind': 'INT'}, 0),
+                           ({'name': npc.ENABLE, 'kind': 'SWITCH'}, True)]:
+            try:
+                stack.panel_write(material, row, value)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('Unsupported edit succeeded')
+            assert dict(material['ruri_uber_floats']) == old_floats
+            assert (stack._mat_mirror()[:, col, :] == old_column).all()
+        report['checks'].append('SurfaceType and transparent enable rejection preserve snapshots and table')
+        pairs = [(link.from_socket, link.to_socket) for link in material.node_tree.links]
+        for source, target in pairs:
+            link = next(link for link in material.node_tree.links
+                        if link.from_socket == source and link.to_socket == target)
+            material.node_tree.links.remove(link)
+            try:
+                npc.validate_transparent_graph(material)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError('Broken graph accepted')
+            finally:
+                material.node_tree.links.new(source, target)
+        npc.validate_transparent_graph(material)
+        report['checks'].append('all nine canonical links individually reject disconnection')
+        stale = bpy.data.materials.new(stack.TEMPLATE_MAT + ' stale-review-test')
+        stale['sora_instance'] = token
+        old_name, old_pointer = stale.name, stale.as_pointer()
+        try:
+            ruri_adapter.build_material([candidates[0]], images, token + '-stale')
+        except RuntimeError as error:
+            assert 'explicit migration' in str(error)
+        else:
+            raise AssertionError('Stale template was silently migrated')
+        assert stale.name == old_name and stale.as_pointer() == old_pointer
+        bpy.data.materials.remove(stale)
+        report['checks'].append('stale template import refusal preserves existing ID and name')
         active = deepcopy(candidates[0])
         active['npr']['floats'][npc.ENABLE] = 1
         before_materials = {item.as_pointer() for item in bpy.data.materials}
