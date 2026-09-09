@@ -59,6 +59,8 @@ def stacks():
                 column = super()._param_write(mat)
                 from .cycles_uniforms import sync
                 sync(self, mat, column)
+                from .npc_customization import sync as sync_customization
+                sync_customization(mat)
                 return column
 
             def restore(self):
@@ -69,6 +71,8 @@ def stacks():
                             and mat.get('ruri_param_col') is not None
                             and mat.get('ruri_uber_part') in self.m['parts']):
                         sync(self, mat, mat['ruri_param_col'])
+                        from .npc_customization import sync as sync_customization
+                        sync_customization(mat)
 
             def group(self, name):
                 existing = next((group for group in bpy.data.node_groups
