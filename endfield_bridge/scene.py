@@ -85,7 +85,8 @@ def create_scene(context, document, material_mode=None):
                     bone.parent = bones[source["parent"]]
                 bones.append(bone)
             bpy.ops.object.mode_set(mode="OBJECT")
-            for bone, source in zip(armature.bones, document["bones"]):
+            for source in document["bones"]:
+                bone = armature.bones[source["name"]]
                 bone["sora_source_path"] = source.get("sourcePath") or ""
                 if source.get('sourceHash') is not None:
                     bone['sora_source_hash'] = str(int(source['sourceHash']))
