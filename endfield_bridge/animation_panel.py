@@ -1,6 +1,6 @@
 """Native Animation Player UI through the existing Sora-Core RPC client."""
 import bpy
-from bpy.props import BoolProperty, CollectionProperty, IntProperty, PointerProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, IntProperty, PointerProperty, StringProperty, EnumProperty
 
 from .client import CoreError, request
 from .scene import apply_clip
@@ -25,9 +25,16 @@ def call(context, method, **parameters):
     return request(bpy.path.abspath(addon.preferences.executable), method, **parameters)
 
 
+def set_status(context, settings, message):
+    settings.status = message
+    context.scene.sora.status = message
+
+
 class SORA_AnimationRow(bpy.types.PropertyGroup):
     identity: StringProperty()
     resource_path: StringProperty()
+    classification: StringProperty()
+    classification_source: StringProperty()
 
 
 class SORA_AnimationClipRow(bpy.types.PropertyGroup):
@@ -35,9 +42,20 @@ class SORA_AnimationClipRow(bpy.types.PropertyGroup):
     path_id: StringProperty()
 
 
+def invalidate_results(settings, context=None):
+    settings.rows.clear();settings.clips.clear();settings.selected=-1;settings.selected_clip=-1
+    settings.offset=0;settings.total=0;settings.result_owner=None;settings.result_root=''
+    settings.clip_resource='';settings.clip_root=''
+
+
 class SORA_AnimationSettings(bpy.types.PropertyGroup):
     game_root: StringProperty(name='Game Folder', subtype='DIR_PATH')
-    query: StringProperty(name='Find animation')
+    query: StringProperty(name='Find animation',update=invalidate_results)
+    category: EnumProperty(name='Category',items=[(v,v.title(),'') for v in ('all','idle','move','attack','skill','interaction','unclassified')],update=invalidate_results)
+    offset: IntProperty(default=0,min=0)
+    total: IntProperty(default=0)
+    result_owner: PointerProperty(type=bpy.types.Object)
+    result_root: StringProperty()
     rows: CollectionProperty(type=SORA_AnimationRow)
     selected: IntProperty(default=0)
     clips: CollectionProperty(type=SORA_AnimationClipRow)
@@ -52,32 +70,42 @@ class SORA_AnimationSettings(bpy.types.PropertyGroup):
 class SORA_OT_animation_search(TaskOperator, bpy.types.Operator):
     bl_idname = 'sora.animation_search'
     bl_label = 'Search native animations'
+    direction: IntProperty(default=0)
 
     def execute(self, context):
         settings = context.scene.sora_animation
         try:
             if not context.scene.sora.game_root.strip():
                 raise ValueError('Choose the native Game Folder')
-            parameters = {'root': bpy.path.abspath(context.scene.sora.game_root), 'query': settings.query}
+            offset=max(0,settings.offset+self.direction*30) if self.direction else 0
+            parameters = {'root': bpy.path.abspath(context.scene.sora.game_root), 'query': settings.query,'category':settings.category,'offset':offset,'limit':30}
             rig = target(context)
             if rig is not None:
                 parameters.update(path=rig['sora_database'], asset=rig['sora_asset'])
-            def complete(rows):
+            signature=(settings.query,settings.category,context.scene.sora.game_root)
+            def complete(page):
+                if signature!=(settings.query,settings.category,context.scene.sora.game_root) or target(context)!=rig:
+                    raise CoreError('Animation owner or filter changed; search again')
+                rows=page['rows']
                 if not isinstance(rows, list):
                     raise CoreError('Animation search returned an invalid list')
                 checked = [(str(row['id']), str(row['path']), str(row['label'])) for row in rows]
                 settings.rows.clear()
-                for identity, path, label in checked:
+                for (identity, path, label),source in zip(checked,rows):
                     row = settings.rows.add()
                     row.name, row.identity, row.resource_path = label, identity, path
-                settings.selected = 0
+                    classification=source.get('classification') or {}
+                    row.classification=classification.get('category','unclassified')
+                    row.classification_source=classification.get('confidence','unknown')+': '+classification.get('rule','')
+                settings.offset=page['offset'];settings.total=page['total'];settings.result_owner=rig;settings.result_root=parameters['root']
+                settings.selected = 0 if rows else -1
                 settings.clips.clear()
                 settings.selected_clip = -1
                 settings.clip_resource = ''
-                settings.status = f'{len(checked)} native animations found'
-            return tasks.start(self, context, 'animation-search', parameters, complete)
+                set_status(context, settings, f'{page["total"]} native animations; showing {offset+1 if rows else 0}-{offset+len(rows)}')
+            return tasks.start(self, context, 'animation-search-page', parameters, complete)
         except (CoreError, ValueError, KeyError, TypeError, RuntimeError) as error:
-            settings.status = str(error)
+            set_status(context, settings, str(error))
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
 
@@ -89,6 +117,10 @@ class SORA_OT_animation_clips(TaskOperator, bpy.types.Operator):
     def execute(self, context):
         settings = context.scene.sora_animation
         try:
+            if settings.result_owner is not None and settings.result_owner!=target(context):
+                raise ValueError('Search animations for the current instance first')
+            if settings.result_root!=bpy.path.abspath(context.scene.sora.game_root) or settings.result_owner!=target(context):
+                raise ValueError('Search animations for the current source and instance first')
             if not context.scene.sora.game_root.strip():
                 raise ValueError('Choose the native Game Folder')
             if not 0 <= settings.selected < len(settings.rows):
@@ -100,6 +132,8 @@ class SORA_OT_animation_clips(TaskOperator, bpy.types.Operator):
             if rig is not None:
                 parameters.update(path=rig['sora_database'], asset=rig['sora_asset'])
             def complete(result):
+                if target(context)!=rig or bpy.path.abspath(context.scene.sora.game_root)!=root:
+                    raise ValueError('Animation source/instance changed; list clips again')
                 if not isinstance(result, list) or not result:
                     raise CoreError('Animation resource has no clips')
                 checked = []
@@ -113,10 +147,10 @@ class SORA_OT_animation_clips(TaskOperator, bpy.types.Operator):
                     row.name, row.cab, row.path_id = name, cab, path_id
                 settings.clip_resource, settings.clip_root = resource, root
                 settings.selected_clip = 0 if len(checked) == 1 else -1
-                settings.status = f'{len(checked)} clips found; select the clip to load'
+                set_status(context, settings, f'{len(checked)} clips found; select the clip to load')
             return tasks.start(self, context, 'animation-clips', parameters, complete)
         except (CoreError, ValueError, KeyError, TypeError, RuntimeError) as error:
-            settings.status = str(error)
+            set_status(context, settings, str(error))
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
 
@@ -134,6 +168,8 @@ class SORA_OT_animation_import(TaskOperator, bpy.types.Operator):
         settings = context.scene.sora_animation
         rig = target(context)
         try:
+            if settings.result_root!=bpy.path.abspath(context.scene.sora.game_root) or settings.result_owner!=target(context):
+                raise ValueError('Search animations for the current source and instance first')
             if not context.scene.sora.game_root.strip():
                 raise ValueError('Choose the native Game Folder')
             if not 0 <= settings.selected < len(settings.rows):
@@ -148,6 +184,7 @@ class SORA_OT_animation_import(TaskOperator, bpy.types.Operator):
                           path=rig['sora_database'], asset=rig['sora_asset'], resource=row.resource_path,
                           selection={'cab': selected.cab, 'pathId': selected.path_id})
             def complete(result):
+                if target(context)!=rig:raise ValueError('Animation target changed before binding')
                 clip, bones = result['clip'], result['bones']
                 metadata = {key:value for key,value in result.items() if key not in {'clip','bones'}}
                 if metadata:
@@ -160,10 +197,10 @@ class SORA_OT_animation_import(TaskOperator, bpy.types.Operator):
                     clip['native'] = native
                 action = yield from apply_clip_steps(context, rig, clip, [bone['name'] for bone in bones],
                                     bone_sources=bones, keep_face_controls=settings.keep_face_controls)
-                settings.status = 'Loaded ' + clip['name'] + ('; manual Face controls override retained face keys' if action.get('sora_face_mode') == 'MANUAL' else '')
+                set_status(context, settings, 'Loaded ' + clip['name'] + ('; manual Face controls override retained face keys' if action.get('sora_face_mode') == 'MANUAL' else ''))
             return tasks.start(self, context, 'animation-import', parameters, complete)
         except (CoreError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as error:
-            settings.status = str(error)
+            set_status(context, settings, str(error))
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
 
@@ -191,8 +228,17 @@ def draw(layout, context):
     settings = context.scene.sora_animation
     layout.label(text='Uses the shared Game Folder')
     layout.prop(settings, 'query')
+    layout.prop(settings, 'category')
     layout.operator('sora.animation_search')
     layout.template_list('UI_UL_list', 'native_animations', settings, 'rows', settings, 'selected', rows=5)
+    row=layout.row(align=True)
+    previous=row.row();previous.enabled=settings.offset>0
+    previous.operator('sora.animation_search',text='',icon='TRIA_LEFT').direction=-1
+    row.label(text=f'{settings.offset+1 if settings.rows else 0}-{settings.offset+len(settings.rows)} / {settings.total}')
+    following=row.row();following.enabled=settings.offset+len(settings.rows)<settings.total
+    following.operator('sora.animation_search',text='',icon='TRIA_RIGHT').direction=1
+    if 0<=settings.selected<len(settings.rows):
+        layout.label(text=settings.rows[settings.selected].classification_source)
     layout.operator('sora.animation_clips')
     if (0 <= settings.selected < len(settings.rows)
             and settings.clip_resource == settings.rows[settings.selected].resource_path

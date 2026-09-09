@@ -30,6 +30,8 @@ def stacks():
     if _STACKS is None:
         from .vendor.ruri_npr import ruri_endfield as runtime
         from .neutral_images import neutral_image
+        from .projection_tables import install as install_projection_tables
+        install_projection_tables(runtime)
         runtime._neutral_image = neutral_image
         runtime.LIGHT_TABLE = 'ENDF NPR-Shader Light Table'
         folder = str(Path(runtime.__file__).parent)

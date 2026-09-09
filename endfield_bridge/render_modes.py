@@ -18,9 +18,17 @@ def source_signature(document):
 
 
 def selected_collection(context):
-    obj=context.object
-    if obj is None or not obj.get('sora_instance'):return None
-    return next((c for c in obj.users_collection if c.get('sora_instance')==obj['sora_instance']),None)
+    from .equipment import owner_collection
+    return owner_collection(context)
+
+
+def owned_tree(collection):
+    result=[collection]
+    for child in collection.children:
+        if child.get('sora_owner_collection')!=collection:
+            raise ValueError('Render tree contains a collection outside this instance')
+        result.extend(owned_tree(child))
+    return result
 
 
 def meshes(collection):
@@ -157,6 +165,46 @@ def switch_steps(context,collection,mode,document=None):
         raise
 
 
+def switch_tree_steps(context,root,mode,documents):
+    tree=owned_tree(root)
+    before_modes={c.as_pointer():c.get(MODE) for c in tree}
+    missing={o.as_pointer():'sora_render_'+mode+'_count' not in o for c in tree for o in meshes(c)}
+    before_data={name:{x.as_pointer() for x in getattr(bpy.data,name)} for name in ('materials','images','node_groups')}
+    before_mods={o.as_pointer():{m.as_pointer() for m in o.modifiers} for c in tree for o in meshes(c)}
+    tokens={c['sora_instance'] for c in tree}
+    completed=[]
+    # Reject unsupported/shared members before changing any member of the tree.
+    for collection in tree:
+        if (collection.get(MODE)!=mode and not collection.get('sora_render_canonical')) or any(o.data.users!=1 for o in meshes(collection)):
+            raise ValueError('Reimport unsupported/shared members before switching the owned render tree')
+        if any(missing[o.as_pointer()] for o in meshes(collection)):
+            document=documents.get(collection.as_pointer())
+            if document is None or source_signature(document)!=collection[SIGNATURE]:
+                raise ValueError('An owned equipment render source changed or is unavailable')
+    try:
+        for collection in tree:
+            yield from switch_steps(context,collection,mode,documents.get(collection.as_pointer()))
+            completed.append(collection)
+    except BaseException:
+        for collection in reversed(completed):
+            for _ in switch_steps(context,collection,before_modes[collection.as_pointer()],None):pass
+        for collection in tree:
+            for obj in meshes(collection):
+                if missing[obj.as_pointer()]:
+                    for key in list(obj.keys()):
+                        if key.startswith('sora_render_'+mode+'_'):del obj[key]
+                for modifier in list(obj.modifiers):
+                    if modifier.as_pointer() not in before_mods[obj.as_pointer()]:obj.modifiers.remove(modifier)
+        while True:
+            removed=False
+            for name in ('materials','node_groups','images'):
+                for item in list(getattr(bpy.data,name)):
+                    if item.as_pointer() not in before_data[name] and item.get('sora_instance') in tokens and item.users==0:
+                        getattr(bpy.data,name).remove(item);removed=True
+            if not removed:break
+        raise
+
+
 class SORA_OT_render_mode(TaskOperator,bpy.types.Operator):
     bl_idname='sora.instance_render_mode'
     bl_label='Switch instance rendering'
@@ -172,14 +220,33 @@ class SORA_OT_render_mode(TaskOperator,bpy.types.Operator):
         obj=next((o for o in collection.objects if o.get('sora_asset')),None)
         if obj is None:
             self.report({'ERROR'},'Instance source identity is missing');return {'CANCELLED'}
-        def complete(document):
-            yield from switch_steps(context,collection,self.mode,document)
-            context.scene.sora.status='Instance render mode: '+self.mode
+        tree=owned_tree(collection)
+        pending=[c for c in tree if any('sora_render_'+self.mode+'_count' not in o for o in meshes(c))]
+        base={'path':obj['sora_database'],'root':bpy.path.abspath(context.scene.sora.game_root)}
+        jobs=[];keys={}
+        dedicated=[c for c in pending if c.get('sora_equipment_role')=='dedicated']
+        if dedicated:
+            jobs.append({'key':'dedicated','method':'equipment-assembly','params':dict(base,asset=obj['sora_asset'],includeOwner=True)})
+        for current in pending:
+            if current in dedicated:continue
+            if current==collection and dedicated:continue
+            source=next((o for o in current.objects if o.get('sora_asset')),None)
+            if source is None:
+                self.report({'ERROR'},'Owned render source identity is missing');return {'CANCELLED'}
+            key=source['sora_asset'];keys[current.as_pointer()]=key
+            if not any(job['key']==key for job in jobs):jobs.append({'key':key,'method':'scene','params':dict(base,asset=key)})
+        def complete(results):
+            results=results or {};documents={}
+            if 'dedicated' in results:
+                packet=results['dedicated'];documents[collection.as_pointer()]=packet['scene']
+                resources={r['resourceId']:r['scene'] for r in packet['equipment']['resources']}
+                for child in dedicated:documents[child.as_pointer()]=resources[child['sora_equipment_resource']]
+            for pointer,key in keys.items():documents[pointer]=results[key]
+            yield from switch_tree_steps(context,collection,self.mode,documents)
+            context.scene.sora.status='Owned character/equipment render mode: '+self.mode
         try:
-            if all('sora_render_'+self.mode+'_count' in mesh for mesh in meshes(collection)):
-                return tasks.start_local(self,context,'Cached render-mode switch',complete)
-            return tasks.start(self,context,'scene',{'path':obj['sora_database'],'asset':obj['sora_asset'],
-                'root':bpy.path.abspath(context.scene.sora.game_root)},complete)
+            if not jobs:return tasks.start_local(self,context,'Cached owned render-tree switch',complete)
+            return tasks.start_batch(self,context,jobs,complete)
         except Exception as error:
             self.report({'ERROR'},str(error));return {'CANCELLED'}
 

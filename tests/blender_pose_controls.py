@@ -9,7 +9,8 @@ rig=target(bpy.context)
 assert rig is not None and pose.IMPORT in rig, 'Select a freshly imported candidate character'
 assert pose.STATE not in rig, 'Restore existing pose session before running regression'
 root=Path('F:/Games/Endfield-unpack/ENDF-DR/audit/v020')
-mapping=json.loads((root/'localized-catalog-smoke.json').read_text())['poseMap']['response']['result']
+assert pose.MAP in rig, 'Validate the current native mapping through the UI before this regression'
+mapping=json.loads(rig[pose.MAP])
 pose.resolve(rig,mapping)
 old_map=rig.get(pose.MAP)
 rig[pose.MAP]=json.dumps(mapping)

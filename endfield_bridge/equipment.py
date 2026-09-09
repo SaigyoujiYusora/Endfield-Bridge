@@ -94,6 +94,9 @@ def apply_state(context,collection,state):
             if target.get('canBind'):bind(context,rig,attachment,target,declarations[child['sora_equipment_slot']]['scale'])
             elif target['visible']:raise ValueError('Visible equipment has no valid native attachment')
             child.hide_viewport=not target['visible'];child.hide_render=not target['visible']
+        from . import generic_weapons
+        if generic_weapons.CONTRACT in collection:
+            generic_weapons.apply_state(context,collection,state)
         collection[STATE]=state
     except BaseException:
         for child,attachment,parent,parent_type,bone,basis,inverse,viewport,render,metadata in previous:
@@ -204,7 +207,8 @@ def draw(layout,context):
         layout.label(text='Dedicated slots: '+str(len(owned_children(collection,'dedicated'))))
         layout.label(text='Events / helper damping: not evaluated')
     else:layout.label(text=collection.get('sora_equipment_status','Dedicated equipment not associated'))
-    layout.label(text='Generic weapon binding requires native compatibility')
+    from . import generic_weapons
+    generic_weapons.draw(layout,context)
 
 CLASSES=(SORA_OT_equipment_load,SORA_OT_equipment_state)
 def register():

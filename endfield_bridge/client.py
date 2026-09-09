@@ -62,6 +62,8 @@ class CoreTask:
         try:
             for line in self.process.stdout:
                 event = json.loads(line)
+                if event.get('event') == 'control':
+                    continue
                 if event.get('protocol') != 1 or event.get('id') != self.identity:
                     raise CoreError('Task response identity or protocol mismatch')
                 if event.get('event') == 'progress':
@@ -85,7 +87,7 @@ class CoreTask:
 
     def cancel(self):
         try:
-            self.process.stdin.write(json.dumps({'method': 'cancel'}) + '\n')
+            self.process.stdin.write(json.dumps({'method': 'cancel', 'targetId': self.identity}) + '\n')
             self.process.stdin.flush()
         except (OSError, ValueError):
             pass
@@ -113,6 +115,8 @@ class TaskSession:
         try:
             for line in self.process.stdout:
                 event = json.loads(line)
+                if event.get('event') == 'control':
+                    continue
                 with self.lock:
                     destination = self.pending.get(event.get('id'))
                     if event.get('protocol') != 1 or destination is None:
@@ -164,7 +168,7 @@ class SessionTask:
     def cancel(self):
         with self.session.lock:
             try:
-                self.process.stdin.write(json.dumps({'method':'cancel'}) + '\n')
+                self.process.stdin.write(json.dumps({'method':'cancel','targetId':self.identity}) + '\n')
                 self.process.stdin.flush()
             except (OSError, ValueError):
                 pass
@@ -175,7 +179,7 @@ class SessionTask:
 
 
 def request_task(executable, method, **parameters):
-    task_type = SessionTask if method in {'search', 'inspect'} else CoreTask
+    task_type = SessionTask if method in {'search', 'inspect', 'animation-search-page'} else CoreTask
     return task_type(executable, method, **parameters)
 
 
@@ -189,3 +193,36 @@ def close_sessions():
             if session.process.poll() is None:
                 session.process.terminate()
     _sessions.clear()
+
+class BatchTask:
+    """Sequential IO-only source acquisition with one cancellation identity at a time."""
+    def __init__(self, executable, requests):
+        import queue,threading
+        self.events=queue.Queue();self.current=None;self.stopped=False;self.done=False;self.process=self
+        def run():
+            results={}
+            try:
+                for job in requests:
+                    if self.stopped:raise CoreError('Cancelled')
+                    self.current=CoreTask(executable,job['method'],**job['params'])
+                    while True:
+                        if self.stopped:raise CoreError('Cancelled')
+                        try:event=self.current.events.get(timeout=0.1)
+                        except queue.Empty:continue
+                        if event.get('event')=='progress':self.events.put(event)
+                        elif 'ok' in event:
+                            if not event['ok']:raise CoreError(event.get('error',{}).get('message','Source request failed'))
+                            results[job['key']]=event['result'];break
+                self.events.put({'ok':True,'result':results})
+            except Exception as error:self.events.put({'ok':False,'error':{'message':str(error)}})
+            finally:
+                self.done=True
+                if self.stopped and self.current:self.current.terminate()
+        threading.Thread(target=run,daemon=True).start()
+    def poll(self):return 0 if self.done else None
+    def cancel(self):
+        self.stopped=True
+        if self.current:self.current.cancel()
+    def terminate(self):
+        self.stopped=True
+        if self.current:self.current.terminate()

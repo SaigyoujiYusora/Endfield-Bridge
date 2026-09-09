@@ -39,7 +39,10 @@ def interrupt():
     report['active_before']=tasks.busy()
     report['probe_before']=bpy.data.objects.get(PROBE) is not None
     if not report['probe_before']:return 0.1
-    if KIND=='load':
+    if KIND=='save':
+        bpy.ops.wm.save_as_mainfile(filepath=str(ROOT/'task-lifecycle-save.blend'),copy=True)
+        bpy.app.timers.register(inspect_result,first_interval=0.1)
+    elif KIND=='load':
         bpy.app.handlers.load_post.append(after_file)
         bpy.ops.wm.open_mainfile(filepath=str(ROOT/'before-candidate-install.blend'))
     else:

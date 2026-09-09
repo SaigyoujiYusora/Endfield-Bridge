@@ -32,6 +32,14 @@ def start_local(operator, context, stage, complete):
     return _attach(operator, context, stage, complete, task)
 
 
+def start_batch(operator, context, requests, complete):
+    from .client import BatchTask
+    if busy():raise CoreError('Wait for or cancel the current task')
+    preferences=context.preferences.addons[__package__].preferences
+    task=BatchTask(bpy.path.abspath(preferences.executable),requests)
+    return _attach(operator,context,'Loading owned render sources',complete,task)
+
+
 def _attach(operator, context, method, complete, task):
     global _active
     operator._closed = False
@@ -51,6 +59,7 @@ def _attach(operator, context, method, complete, task):
     settings = context.scene.sora
     settings.task_running = True
     settings.task_stage = 'Starting ' + method
+    settings.status = settings.task_stage
     settings.task_detail = ''
     settings.task_tick = 0
     settings.task_total = 0
@@ -198,7 +207,14 @@ def _after_load(_):
                 settings.task_running = False
 
 
+@persistent
+def _before_save(_):
+    shutdown()
+
+
 def register():
+    if _before_save not in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.append(_before_save)
     if _before_load not in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.append(_before_load)
     if _after_load not in bpy.app.handlers.load_post:
@@ -207,6 +223,8 @@ def register():
 
 def unregister():
     shutdown()
+    if _before_save in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.remove(_before_save)
     if _before_load in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.remove(_before_load)
     if _after_load in bpy.app.handlers.load_post:
