@@ -9,7 +9,7 @@ def owned_values(prefix):
         if name == prefix or name.startswith(prefix + '.'):
             for value in vars(module).values():
                 if (inspect.isclass(value) or inspect.isfunction(value)) and id(value) not in seen:
-                    if getattr(value, '__module__', '').startswith(prefix):
+                    if (getattr(value, '__module__', '') or '').startswith(prefix):
                         seen.add(id(value))
                         yield value
 
@@ -21,7 +21,8 @@ class RegistrationTransaction:
                            if inspect.isclass(value) and getattr(value, 'is_registered', False)}
         self.timers = {value for value in owned_values(prefix)
                        if inspect.isfunction(value) and bpy.app.timers.is_registered(value)}
-        self.handlers = [(value, list(value)) for value in vars(bpy.app.handlers).values() if isinstance(value, list)]
+        self.handlers = [(value, list(value)) for name in dir(bpy.app.handlers)
+                         if isinstance(value := getattr(bpy.app.handlers, name), list)]
         self.namespace = dict(bpy.app.driver_namespace)
         self.props = [(owner, name, hasattr(owner, name)) for owner, name in properties]
 
@@ -37,7 +38,7 @@ class RegistrationTransaction:
                 attempt(lambda value=value: self.bpy.app.timers.unregister(value))
         for handlers, previous in self.handlers:
             for value in list(handlers):
-                if value not in previous and getattr(value, '__module__', '').startswith(self.prefix):
+                if value not in previous and (getattr(value, '__module__', '') or '').startswith(self.prefix):
                     handlers.remove(value)
         for owner, name, existed in self.props:
             if not existed and hasattr(owner, name):
@@ -48,7 +49,7 @@ class RegistrationTransaction:
             attempt(lambda value=value: self.bpy.utils.unregister_class(value))
         namespace = self.bpy.app.driver_namespace
         for key, value in list(namespace.items()):
-            if getattr(value, '__module__', '').startswith(self.prefix):
+            if (getattr(value, '__module__', '') or '').startswith(self.prefix):
                 if key in self.namespace:
                     namespace[key] = self.namespace[key]
                 else:
