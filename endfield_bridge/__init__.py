@@ -185,6 +185,7 @@ class SORA_PT_panel(bpy.types.Panel):
         if preferences:
             layout.prop(preferences.preferences, "executable")
         layout.operator("sora.check")
+        layout.label(text="Map data: placeholder", icon="INFO")
         layout.prop(settings, "database")
         layout.prop(settings, "query")
         layout.operator("sora.search")
