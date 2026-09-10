@@ -304,7 +304,8 @@ def set_manual_face(context, rig, enabled):
         existing = {(c.data_path,c.array_index) for c in animation.drivers} if animation else set()
         if any((curve.data_path,curve.array_index) in existing - owned for _,curve in old['resolved']):
             raise ValueError('A user driver conflicts with the animation face; mode left unchanged')
-    slot = animation.action_slot if animation else None
+    from .action_binding import bind_action, slot_identity
+    slot = slot_identity(animation.action_slot) if animation else None
     detached = False
     try:
         _release_face_mask(old)
@@ -318,7 +319,7 @@ def set_manual_face(context, rig, enabled):
             managed['sora_face_reset_defaults'] = False
         if enabled and resolved and not was_enabled:
             # Only detach this verified local Action; NLA remains visible to Face validation.
-            animation.action = None
+            bind_action(rig,None)
             detached = True
         face.set_enabled(rig, enabled)
     except Exception:
@@ -331,8 +332,7 @@ def set_manual_face(context, rig, enabled):
         raise
     finally:
         if detached:
-            animation.action = current
-            animation.action_slot = slot
+            bind_action(rig,current,slot,select_slot=True)
     # Face's activation snapshot predates the newer sparse Action. Disabling its
     # drivers must not resurrect that old pose on unkeyed source components.
     for pose, channel, axis, value in defaults:
@@ -417,7 +417,8 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
 
     animation = rig.animation_data
     previous_action = animation.action if animation else None
-    previous_slot = animation.action_slot if animation else None
+    from .action_binding import bind_action, slot_identity
+    previous_slot = slot_identity(animation.action_slot) if animation else None
     timing = (context.scene.render.fps, context.scene.render.fps_base, context.scene.frame_start,
               context.scene.frame_end, context.scene.frame_current, context.scene.frame_subframe)
     pose_state = [(bone, bone.rotation_mode, bone.matrix_basis.copy()) for bone in rig.pose.bones]
@@ -440,8 +441,9 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
         if previous_action is not None:
             action['sora_previous_action'] = previous_action
             if previous_slot is not None:
-                action['sora_previous_slot'] = previous_slot.identifier
+                action['sora_previous_slot'] = previous_slot['identifier']
         slot = action.slots.new(id_type='OBJECT', name=rig.name)
+        created_slot_identity = slot_identity(slot)
         layer = action.layers.new('Animation')
         strip = layer.strips.new(type='KEYFRAME')
         bag = strip.channelbags.new(slot)
@@ -491,8 +493,7 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
                     if (path, axis) not in existing_drivers:
                         getattr(bone, attribute)[axis] = value
         rig.animation_data_create()
-        rig.animation_data.action = action
-        rig.animation_data.action_slot = slot
+        bind_action(rig,action,created_slot_identity,select_slot=True)
         _release_face_mask(old_face_mask)
         _associate_face(rig, action, bool(rig.get(face.ENABLED)))
         for name in rotation_bones:
@@ -509,9 +510,7 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
         _restore_face_mask(old_face_mask)
         _restore_properties(rig, previous_override)
         if animation is not None:
-            rig.animation_data.action = previous_action
-            if previous_slot is not None:
-                rig.animation_data.action_slot = previous_slot
+            bind_action(rig,previous_action,previous_slot,select_slot=previous_slot is not None)
         else:
             rig.animation_data_clear()
         bpy.data.actions.remove(action)

@@ -6,6 +6,7 @@ from bpy.props import StringProperty
 from mathutils import Matrix, Vector
 from . import tasks
 from .tasks import TaskOperator
+from .action_binding import bind_action
 
 MAP = 'sora_pose_map'
 IMPORT = 'sora_import_pose'
@@ -108,7 +109,7 @@ def suspend(context, rig):
         rig[ACTION] = animation.action
     rig[STATE] = json.dumps(state)
     if animation:
-        animation.action = None
+        bind_action(rig,None)
         for track in animation.nla_tracks: track.mute = True
         for curve in animation.drivers: curve.mute = True
     for bone in rig.pose.bones:
@@ -165,10 +166,7 @@ def restore(context, rig):
         bone.matrix_basis = matrix(saved['basis'])
     restore_root(rig,state)
     if animation:
-        animation.action = rig.get(ACTION)
-        if animation.action and state['slot']:
-            slot = next((s for s in animation.action.slots if s.identifier == state['slot']), None)
-            if slot: animation.action_slot = slot
+        bind_action(rig,rig.get(ACTION),state['slot'],select_slot=bool(state['slot']))
         for name, mute in state['nla']: nla[name].mute = mute
         for path, axis, mute in state['drivers']: drivers[(path,axis)].mute = mute
     for constraint,mute in constraints: constraint.mute = mute
