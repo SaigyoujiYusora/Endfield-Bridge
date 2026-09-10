@@ -240,6 +240,8 @@ def draw(layout,context):
     else:layout.label(text=collection.get('sora_equipment_status','Dedicated equipment not associated'))
     from . import generic_weapons
     generic_weapons.draw(layout,context)
+    from . import equipment_animation
+    equipment_animation.draw(layout,context)
 
 CLASSES=(SORA_OT_equipment_load,SORA_OT_equipment_state)
 def register():

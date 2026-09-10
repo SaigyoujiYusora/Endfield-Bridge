@@ -539,10 +539,11 @@ def _migrate_sources_timer():
 
 
 def register():
-    from . import post, ruri_adapter, material_panel, face_controls, animation_panel, pose_controls, render_modes, equipment, generic_weapons
+    from . import post, ruri_adapter, material_panel, face_controls, animation_panel, pose_controls, render_modes, equipment, generic_weapons, equipment_animation
     from .registration import RegistrationTransaction
     transaction = RegistrationTransaction(bpy, __package__, (
         (bpy.types.Scene, 'sora'), (bpy.types.Scene, 'sora_animation'), (bpy.types.Scene, 'sora_weapons'),
+        (bpy.types.Scene, 'sora_equipment_animation'),
         (bpy.types.WindowManager, 'endf_npr_search')))
     try:
         ruri_adapter.register()
@@ -557,6 +558,7 @@ def register():
         render_modes.register()
         equipment.register()
         generic_weapons.register()
+        equipment_animation.register()
         tasks.register()
         if migrate_saved_sources not in bpy.app.handlers.load_post:
             bpy.app.handlers.load_post.append(migrate_saved_sources)
@@ -575,7 +577,8 @@ def unregister():
     if migrate_saved_sources in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(migrate_saved_sources)
     tasks.unregister()
-    from . import pose_controls, render_modes, equipment, generic_weapons
+    from . import pose_controls, render_modes, equipment, generic_weapons, equipment_animation
+    equipment_animation.unregister()
     generic_weapons.unregister()
     equipment.unregister()
     render_modes.unregister()

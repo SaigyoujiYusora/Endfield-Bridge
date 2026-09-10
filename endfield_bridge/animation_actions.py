@@ -33,7 +33,7 @@ def resolve_bones(rig, names, sources=None):
     return result
 
 
-def samples(track, dimension, fps, duration, quaternion=False):
+def samples(track, dimension, fps, duration, quaternion=False, frame_origin=1):
     frames, values = [], []
     previous_time = -math.inf
     previous_quaternion = None
@@ -51,7 +51,7 @@ def samples(track, dimension, fps, duration, quaternion=False):
             if previous_quaternion is not None and sum(a*b for a,b in zip(value,previous_quaternion)) < 0:
                 value = [-x for x in value]
             previous_quaternion = value
-        frames.append(1 + time * fps)
+        frames.append(frame_origin + time * fps)
         values.append(value)
         previous_time = time
     if not frames:
@@ -349,7 +349,7 @@ def apply_clip(context, rig, clip, bone_names, bone_sources=None, keep_face_cont
             return finished.value
 
 
-def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_face_controls=False):
+def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_face_controls=False, *, timeline=None):
     if rig is not None and rig.get('sora_pose_resume'):
         raise ValueError('Restore suspended animation before loading another clip')
     if context.mode not in {'OBJECT', 'POSE'}:
@@ -359,6 +359,12 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
     fps, duration = float(clip['fps']), float(clip['duration'])
     if not math.isfinite(fps) or not math.isfinite(duration) or fps <= 0 or duration < 0 or 1 + duration*fps > 1048574:
         raise ValueError('Animation timing exceeds Blender limits')
+    source_fps=fps
+    frame_origin=1.0
+    if timeline is not None:
+        fps,frame_origin=float(timeline['fps']),float(timeline['origin'])
+        if not math.isfinite(fps) or fps<=0 or not math.isfinite(frame_origin) or frame_origin < -1048574 or frame_origin+duration*fps>1048574:
+            raise ValueError('Equipment timeline mapping exceeds Blender limits')
     bones = resolve_bones(rig, bone_names, bone_sources)
     existing_drivers = {(c.data_path,c.array_index) for c in rig.animation_data.drivers} if rig.animation_data else set()
     face_drivers = owned_face_drivers(rig) if keep_face_controls else set()
@@ -383,7 +389,7 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
             rotation_bones.add(bone.name)
             if any(path == bone.path_from_id(other) for path, _ in existing_drivers for other in ('rotation_euler','rotation_axis_angle')):
                 raise ValueError('Existing non-quaternion rotation driver conflicts with animation: ' + bone.name)
-        frames, values = samples(track, dimension, fps, duration, channel == 'rotation')
+        frames, values = samples(track, dimension, fps, duration, channel == 'rotation', frame_origin)
         path = bone.path_from_id(attribute)
         for axis in range(dimension):
             destination = (path, axis)
@@ -406,7 +412,7 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
         path = '[' + json.dumps(prop, ensure_ascii=False) + ']'
         if any(p == path for p, _ in existing_drivers):
             raise ValueError('Existing scalar driver conflicts with animation: ' + name)
-        frames, values = samples(track, 1, fps, duration)
+        frames, values = samples(track, 1, fps, duration, frame_origin=frame_origin)
         scalar_properties[prop] = name
         prepared.append((path, 0, 'Native Animator Scalars', frames, values, 0, False, None))
     if not prepared:
@@ -428,6 +434,9 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
     action = bpy.data.actions.new(clip['name'])
     try:
         action['sora_instance'] = rig['sora_instance']
+        if timeline is not None:
+            action['sora_timeline_mapping']=json.dumps({'sourceFps':source_fps,'actionFps':fps,'frameOrigin':frame_origin,
+                'frameEnd':frame_origin+duration*fps,'durationSeconds':duration,'sceneTimingPreserved':True})
         action['sora_animation_owner'] = uuid.uuid4().hex
         action['sora_clip_metadata'] = json.dumps({k:v for k,v in clip.items() if k not in {'tracks','scalarTracks'}}, separators=(',', ':'))
         action['sora_track_metadata'] = json.dumps([{k:v for k,v in track.items() if k != 'keys'} for track in clip['tracks']], separators=(',', ':'))
@@ -499,11 +508,15 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
         for name in rotation_bones:
             rig.pose.bones[name].rotation_mode = 'QUATERNION'
         action.use_fake_user = True
-        context.scene.render.fps = max(1, round(fps))
-        context.scene.render.fps_base = context.scene.render.fps / fps
-        context.scene.frame_start = 1
-        context.scene.frame_end = max(1, math.ceil(duration*fps) + 1)
-        _refresh_frame(context, rig, 1)
+        if timeline is None:
+            context.scene.render.fps = max(1, round(fps))
+            context.scene.render.fps_base = context.scene.render.fps / fps
+            context.scene.frame_start = 1
+            context.scene.frame_end = max(1, math.ceil(duration*fps) + 1)
+            _refresh_frame(context, rig, 1)
+        else:
+            rig.update_tag()
+            context.view_layer.update()
         return action
     except BaseException:
         # Restore the previous mask before evaluating its Action again.
@@ -514,8 +527,9 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
         else:
             rig.animation_data_clear()
         bpy.data.actions.remove(action)
-        context.scene.render.fps, context.scene.render.fps_base, context.scene.frame_start, context.scene.frame_end = timing[:4]
-        context.scene.frame_set(timing[4], subframe=timing[5])
+        if timeline is None:
+            context.scene.render.fps, context.scene.render.fps_base, context.scene.frame_start, context.scene.frame_end = timing[:4]
+            context.scene.frame_set(timing[4], subframe=timing[5])
         for bone, mode, matrix in pose_state:
             bone.rotation_mode = mode
             bone.matrix_basis = matrix
