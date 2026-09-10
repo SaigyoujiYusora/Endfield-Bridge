@@ -79,6 +79,35 @@ def invalidate(self, context):
     self.total = 0
 
 
+def invalidate_source(self, context):
+    invalidate(self, context)
+    self.payload_bytes = -1
+    self.max_payload_bytes = 0
+    self.database_format_version = 0
+    self.budget_database = ''
+
+
+def database_budget(settings, result):
+    values = tuple(result.get(key) for key in ('formatVersion', 'payloadBytes', 'maxPayloadBytes'))
+    version, payload, maximum = values
+    valid = (all(type(value) is int and 0 <= value <= 2_147_483_647 for value in values)
+             and version > 0 and maximum > 0 and payload <= maximum)
+    settings.database_format_version = version if valid else 0
+    settings.payload_bytes = payload if valid else -1
+    settings.max_payload_bytes = maximum if valid else 0
+    settings.budget_database = settings.database if valid else ''
+
+
+def database_budget_lines(settings):
+    if settings.payload_bytes < 0 or settings.budget_database != settings.database:
+        return ('库容量：尚未获取',)
+    used = settings.payload_bytes / 1048576
+    maximum = settings.max_payload_bytes / 1048576
+    remaining = (settings.max_payload_bytes - settings.payload_bytes) / 1048576
+    return (f'JSON {used:.1f} / {maximum:.1f} MiB',
+            f'余量 {remaining:.1f} MiB · v{settings.database_format_version}')
+
+
 class SORA_Settings(bpy.types.PropertyGroup):
     face_filter: StringProperty(name="Face controls and presets")
     face_index: IntProperty(name="Control", default=0, min=0)
@@ -89,8 +118,12 @@ class SORA_Settings(bpy.types.PropertyGroup):
         name="ENDF NPR-Shader post-processing", default=True, update=update_npr_post,
         description="Apply game tone mapping to the entire scene after its existing compositor, including viewport and final render; uses Standard color management and neutral exposure/gamma, and restores previous settings when disabled")
 
-    game_root: StringProperty(name="Game Folder", subtype="DIR_PATH", update=invalidate)
-    database: StringProperty(name="Sora Endfield Database", subtype="FILE_PATH", update=invalidate)
+    game_root: StringProperty(name="Game Folder", subtype="DIR_PATH", update=invalidate_source)
+    database: StringProperty(name="Sora Endfield Database", subtype="FILE_PATH", update=invalidate_source)
+    payload_bytes: IntProperty(default=-1, min=-1, description="Validated JSON payload bytes, excluding the 52-byte file header")
+    max_payload_bytes: IntProperty(default=0, min=0)
+    database_format_version: IntProperty(default=0, min=0)
+    budget_database: StringProperty()
     source_details: BoolProperty(name="Data source settings", default=True)
     category: EnumProperty(name="Library", items=[('PEOPLE','人物',''),('ITEMS','物品',''),('SCENES','场景','')], update=invalidate)
     kind: EnumProperty(name="Type", items=[('character','角色',''),('npc','NPC','')], update=invalidate)
@@ -157,6 +190,7 @@ def database_parameters(settings, operation, abspath):
 
 def database_complete(settings, context, operation, has_database, result):
     invalidate(settings, context)
+    database_budget(settings, result if has_database else {})
     settings.source_details = True
     version = str(result.get('gameVersion') or result.get('version') or 'version unreported')
     if operation == 'game-validate':
@@ -452,6 +486,8 @@ class SORA_PT_panel(bpy.types.Panel):
             row = box.row(align=True)
             row.operator('sora.database_task', text='Validate').operation = 'game-validate'
             row.operator('sora.database_task', text='Build / Update').operation = 'database-build'
+        for line in database_budget_lines(settings):
+            box.label(text=line)
         box = layout.box()
         box.enabled = not settings.task_running
         box.label(text='资源库')

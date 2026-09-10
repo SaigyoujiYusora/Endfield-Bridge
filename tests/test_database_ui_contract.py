@@ -6,7 +6,7 @@ import unittest
 ROOT=Path(__file__).resolve().parents[1]/'endfield_bridge'
 ns={'CoreError':RuntimeError}
 tree=ast.parse((ROOT/'__init__.py').read_text(encoding='utf-8'))
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in {'invalidate','database_parameters','database_complete'}],type_ignores=[]),'<database contract>','exec'),ns)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in {'invalidate','invalidate_source','database_budget','database_budget_lines','database_parameters','database_complete'}],type_ignores=[]),'<database contract>','exec'),ns)
 tree=ast.parse((ROOT/'animation_panel.py').read_text())
 exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='set_status'],type_ignores=[]),'<animation status>','exec'),ns)
 
@@ -14,6 +14,27 @@ def settings(database='test.sredb'):
     return NS(game_root='game',database=database,assets=['stale'],selected=0,result_database='old',offset=30,total=99,source_details=False,status='Imported old asset')
 
 class DatabaseUiContractTests(unittest.TestCase):
+    def test_validated_budget_and_compact_lines(self):
+        value=settings()
+        ns['database_complete'](value,None,'database-build',True,{'gameVersion':'v9','assets':4321,'formatVersion':3,'payloadBytes':240649994,'maxPayloadBytes':268435456})
+        self.assertEqual(value.payload_bytes,240649994)
+        self.assertEqual(value.max_payload_bytes-value.payload_bytes,27785462)
+        self.assertEqual(ns['database_budget_lines'](value),('JSON 229.5 / 256.0 MiB','余量 26.5 MiB · v3'))
+    def test_missing_or_invalid_optional_budget_clears_old_values(self):
+        value=settings()
+        for result in ({},{'formatVersion':3,'payloadBytes':True,'maxPayloadBytes':10},{'formatVersion':3,'payloadBytes':11,'maxPayloadBytes':10},{'formatVersion':3,'payloadBytes':1.5,'maxPayloadBytes':10}):
+            value.payload_bytes=12;value.budget_database=value.database
+            ns['database_budget'](value,result)
+            self.assertEqual(value.payload_bytes,-1);self.assertEqual(value.budget_database,'')
+    def test_source_change_clears_budget_but_filter_change_keeps_it(self):
+        value=settings();ns['database_budget'](value,{'formatVersion':2,'payloadBytes':0,'maxPayloadBytes':268435456})
+        ns['invalidate'](value,None);self.assertEqual(value.payload_bytes,0)
+        ns['invalidate_source'](value,None);self.assertEqual(value.payload_bytes,-1)
+        self.assertEqual(ns['database_budget_lines'](value),('库容量：尚未获取',))
+    def test_mismatch_retains_valid_container_budget_without_enabling_import(self):
+        value=settings()
+        with self.assertRaises(RuntimeError):ns['database_complete'](value,None,'game-validate',True,{'matches':False,'formatVersion':3,'payloadBytes':40,'maxPayloadBytes':50})
+        self.assertEqual(value.payload_bytes,40);self.assertEqual(value.selected,-1)
     def test_root_only_validation_never_resolves_empty_database(self):
         calls=[]
         def resolve(value):calls.append(value);return '/resolved/'+value
