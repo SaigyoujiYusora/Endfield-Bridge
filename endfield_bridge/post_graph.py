@@ -13,7 +13,7 @@ ACTIONS = 'endf_npr_post_private_actions'
 NOTICE = 'endf_npr_post_notice'
 REFERENCES = 'endf_npr_post_signature_references'
 COMPLETE = 'endf_npr_post_complete_signature'
-ADAPTER = 'endf_npr_post_adapter_signature'
+ADAPTER = 'endf_npr_post_adapter_signature_v2'
 
 
 def _value(value):
@@ -75,7 +75,7 @@ def _animation(tree):
                      for s in track.strips] for track in data.nla_tracks]}
 
 
-def signature(tree, ignored=(), *, animation=True, layout=True, register=False):
+def signature(tree, ignored=(), *, animation=True, layout=True, register=False, tree_metadata=True):
     """Behavioral signature, excluding node-editor layout and our metadata."""
     ignored = set(ignored)
     animation_state = _animation(tree) if animation else None
@@ -107,9 +107,12 @@ def signature(tree, ignored=(), *, animation=True, layout=True, register=False):
     payload = {'nodes': nodes, 'links': sorted([
         (l.from_node.name, l.from_socket.identifier, l.to_node.name, l.to_socket.identifier)
         for l in tree.links if l.from_node.name not in ignored and l.to_node.name not in ignored]),
-        'interface': [(s.name, getattr(s, 'in_out', ''), getattr(s, 'socket_type', ''))
-                      for s in tree.interface.items_tree],
-        'properties': {k: _value(v) for k, v in tree.items() if not k.startswith('endf_npr_post_')}}
+        }
+    if tree_metadata:
+        payload['interface'] = [(s.name, getattr(s, 'in_out', ''), getattr(s, 'socket_type', ''))
+                                for s in tree.interface.items_tree]
+        payload['properties'] = {k: _value(v) for k, v in tree.items()
+                                 if not k.startswith('endf_npr_post_')}
     if animation:
         payload['animation'] = animation_state
     references = list(dict(tree.get(REFERENCES, {})).values())
@@ -285,7 +288,7 @@ def build(scene, previous, group, color_in, color_out, owner_key):
         tree[BASELINE] = signature(tree, json.loads(tree[ADDED])['nodes'], register=True)
         tree[COMPLETE] = signature(tree, register=True)
         added_names = set(json.loads(tree[ADDED])['nodes'])
-        tree[ADAPTER] = signature(tree, [n.name for n in tree.nodes if n.name not in added_names], animation=False, register=True)
+        tree[ADAPTER] = adapter_signature(tree, added_names, register=True)
         return tree
     except Exception:
         dispose(tree)
@@ -306,12 +309,19 @@ def _adapter_animated(tree, names):
     return contains(_animation(tree))
 
 
+def adapter_signature(tree, names, *, register=False):
+    # Tree properties may drive upstream nodes. They and the output interface
+    # belong to the retained user graph, not to our removable adapter. Animation
+    # is checked separately by destination path, including Action/NLA/drivers.
+    return signature(tree, [n.name for n in tree.nodes if n.name not in names],
+                     animation=False, tree_metadata=False, register=register)
+
+
 def retain_edited_upstream(tree):
     """Strip only our adapter; keep an edited private upstream active on disable."""
     record = json.loads(tree[ADDED])
     added_names = set(record['nodes'])
-    adapter_edited = (ADAPTER not in tree or signature(tree,
-        [n.name for n in tree.nodes if n.name not in added_names], animation=False) != tree[ADAPTER]
+    adapter_edited = (ADAPTER not in tree or adapter_signature(tree, added_names) != tree[ADAPTER]
         or _adapter_animated(tree, added_names))
     if adapter_edited:
         # The user now owns this complete stage. Never delete its values,

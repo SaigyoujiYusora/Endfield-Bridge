@@ -7,6 +7,7 @@ from mathutils import Matrix
 from . import tasks
 from .tasks import TaskOperator
 from .equipment_math import validate_wire,tail_compensated
+from .equipment_initial_pose import validate_initial_pose_identity
 
 CONTRACT='sora_equipment_contract'
 STATE='sora_equipment_state'
@@ -20,17 +21,15 @@ def apply_initial_equipment_pose(rig,resource):
     """Apply Core's source-derived initial pose only to a newly created child rig."""
     pose=resource.get('defaultPose')
     if pose is None:return
-    if rig is None or pose.get('time')!=0 or pose.get('status')!='native-controller-default-at-zero':
+    if rig is None or rig.get('sora_equipment_resource')!=resource.get('resourceId') or rig.get('sora_resource_path')!=resource.get('resourcePath'):
         raise ValueError('Invalid native initial equipment pose')
     if rig.animation_data and (rig.animation_data.action or rig.animation_data.nla_tracks):
         raise ValueError('Initial equipment pose cannot overwrite an existing Action')
-    sources=resource['scene']['bones'];rows=pose.get('bones',[])
-    if len(rows)!=len(sources) or {r.get('bone') for r in rows}!=set(range(len(sources))):
-        raise ValueError('Initial equipment pose bone coverage differs from its scene')
+    sources,rows=validate_initial_pose_identity(resource,pose)
     checked=[]
     for row in rows:
         source=sources[row['bone']];bone=rig.pose.bones.get(source['name']);values=row.get('basisMatrix')
-        if bone is None or bone.bone.get('sora_source_path')!=row.get('sourcePath') or source.get('sourcePath')!=row.get('sourcePath'):
+        if bone is None or type(bone.bone.get('sora_source_index')) is not int or bone.bone.get('sora_source_index')!=row['bone'] or bone.bone.get('sora_source_path')!=row.get('sourcePath'):
             raise ValueError('Initial equipment pose source bone identity differs')
         if not isinstance(values,list) or len(values)!=16 or not all(isinstance(v,(float,int)) and math.isfinite(v) for v in values):
             raise ValueError('Initial equipment pose matrix is invalid')
@@ -159,6 +158,9 @@ def create_dedicated_steps(context,collection,rig,assembly,material_mode=None,st
             resource=resources[slot['resourceId']]
             child,child_rig=yield from create_scene_steps(context,resource['scene'],material_mode)
             created.append(child)
+            if child_rig is not None:
+                child_rig['sora_equipment_resource']=resource['resourceId']
+                child_rig['sora_resource_path']=resource['resourcePath']
             apply_initial_equipment_pose(child_rig,resource)
             collection.children.link(child)
             context.scene.collection.children.unlink(child)
