@@ -76,6 +76,24 @@ def cancel():
         _active._task.cancel()
 
 
+def _redraw_task_views(context):
+    try:
+        windows = tuple(context.window_manager.windows)
+    except (AttributeError, ReferenceError, RuntimeError):
+        return
+    for window in windows:
+        try:
+            areas = tuple(window.screen.areas)
+        except (AttributeError, ReferenceError, RuntimeError):
+            continue
+        for area in areas:
+            try:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+            except (AttributeError, ReferenceError, RuntimeError):
+                continue
+
+
 def _finish(operator, context, error=None):
     global _active
     if getattr(operator, '_closed', False):
@@ -114,6 +132,7 @@ def _finish(operator, context, error=None):
     finally:
         if _active is operator:
             _active = None
+        _redraw_task_views(context)
     if errors:
         message = '; '.join(errors)
         print('[Endfield-Bridge task] ' + message)

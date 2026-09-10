@@ -306,11 +306,16 @@ class SORA_OT_equipment_animation_import(TaskOperator,bpy.types.Operator):
 
 
 def draw(layout,context):
+    from . import wrapped_label
     settings=context.scene.sora_equipment_animation
     box=layout.box();box.label(text='专用装备 · 原生片段')
+    wrapped_label(box,settings.status,context)
+    if context.scene.sora.task_error:
+        wrapped_label(box,'最近任务错误：'+context.scene.sora.task_error,context)
     row=box.row();row.enabled=not tasks.busy()
     row.operator('sora.equipment_animation_sources');row.operator('sora.equipment_animation_capabilities')
     if settings.owner!=eq.owner_collection(context):box.label(text='刷新当前角色的专用装备列表');return
+    if settings.sources and not settings.controllers:wrapped_label(box,'该专用装备没有已记录的原生控制器。',context)
     body=box.column();body.enabled=not tasks.busy()
     body.template_list('UI_UL_list','equipment_animation_sources',settings,'sources',settings,'selected_source',rows=2)
     body.label(text='原生控制器 / Animator')
@@ -330,11 +335,8 @@ def draw(layout,context):
     playback=body.row()
     playback.enabled=bool(current_rig and current_rig.animation_data and current_rig.animation_data.action)
     playback.operator('screen.animation_play',text='播放 / 暂停',icon='PLAY')
-    from . import wrapped_label
-    if settings.sources and not settings.controllers:wrapped_label(box,'该专用装备没有已记录的原生控制器。',context)
     if current_rig and any(child.hide_viewport for child in eq.owned_children(settings.owner,'dedicated') if current_rig.name in child.objects):
         wrapped_label(box,'当前专用装备隐藏；可用上方静态状态按钮查看，不会自动改变显隐。',context)
-    wrapped_label(box,settings.status,context)
     wrapped_label(box,'按当前时间轴手动播放片段；不自动执行控制器切换或显隐事件。',context)
 
 
