@@ -482,6 +482,8 @@ def restore(*_):
     for material in bpy.data.materials:
         if material.get('ruri_uber_stack') in {stack.PANEL_KEY for stack in stacks()}:
             localize_material(material)
+    from .outline_migration import restore_outlines
+    restore_outlines(stacks())
     update()
 
 

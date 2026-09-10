@@ -153,18 +153,31 @@ def sync_viewport(context=None):
     if window is None or window.screen is None:
         return
     screen, scene = window.screen, window.scene
-    if screen.get(VIEW_OWNER) == scene and installed(scene):
-        return
-    if screen.get(VIEW_STATE):
+    same_owner = screen.get(VIEW_OWNER) == scene and installed(scene)
+    records = json.loads(screen.get(VIEW_STATE, '[]')) if same_owner else []
+    if screen.get(VIEW_STATE) and not same_owner:
         _restore_viewport(screen)
     if not installed(scene):
         return
-    records = []
+    known = {(r.get('area_pointer'), r.get('space_pointer')) for r in records}
     for index, area in enumerate(screen.areas):
         if area.type != 'VIEW_3D':
             continue
         # Only the active VIEW_3D space, not dormant editor spaces.
         space = area.spaces.active
+        identity = (str(area.as_pointer()), str(space.as_pointer()))
+        if identity not in known:
+            # Saved RNA pointers are process-local. Rebind only the same saved
+            # index/rectangle contract used by restoration, preserving baseline.
+            saved = next((r for r in records if r['area'] == index
+                and r['space'] == list(area.spaces).index(space)
+                and r['rect'] == [area.x, area.y, area.width, area.height]
+                and not any(str(a.as_pointer()) == r.get('area_pointer') for a in screen.areas)), None)
+            if saved is not None:
+                saved['area_pointer'], saved['space_pointer'] = identity
+                known.add(identity)
+        if identity in known:
+            continue  # Retain its original baseline and any subsequent user mode edit.
         records.append({'area': index, 'space': list(area.spaces).index(space),
                         'area_pointer': str(area.as_pointer()),
                         'space_pointer': str(space.as_pointer()),
@@ -239,7 +252,8 @@ def disable(scene):
             # A changed upstream belongs to this scene, never the shared source.
             retain_edited_upstream(tree)
             retained = True
-            scene[NOTICE] = 'Kept your edited private compositor; the original shared compositor is unchanged.'
+            scene[NOTICE] = ('Kept your edited private compositor; the original shared compositor is unchanged. '
+                             'An edited adapter remains in the graph under your control.')
     for screen in list(dict(scene.get(SCREENS, {})).values()):
         if screen is not None and screen.get(VIEW_OWNER) == scene:
             _restore_viewport(screen)

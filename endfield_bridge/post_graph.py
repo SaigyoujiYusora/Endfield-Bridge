@@ -12,6 +12,8 @@ BASELINE = 'endf_npr_post_upstream_signature'
 ACTIONS = 'endf_npr_post_private_actions'
 NOTICE = 'endf_npr_post_notice'
 REFERENCES = 'endf_npr_post_signature_references'
+COMPLETE = 'endf_npr_post_complete_signature'
+ADAPTER = 'endf_npr_post_adapter_signature'
 
 
 def _value(value):
@@ -281,6 +283,9 @@ def build(scene, previous, group, color_in, color_out, owner_key):
                 'source':[source.node.name,source.identifier] if source is not None else None,
                 'default':baseline_default})
         tree[BASELINE] = signature(tree, json.loads(tree[ADDED])['nodes'], register=True)
+        tree[COMPLETE] = signature(tree, register=True)
+        added_names = set(json.loads(tree[ADDED])['nodes'])
+        tree[ADAPTER] = signature(tree, [n.name for n in tree.nodes if n.name not in added_names], animation=False, register=True)
         return tree
     except Exception:
         dispose(tree)
@@ -289,12 +294,33 @@ def build(scene, previous, group, color_in, color_out, owner_key):
 
 def upstream_changed(tree):
     record = json.loads(tree[ADDED])
-    return signature(tree, record['nodes']) != tree[BASELINE]
+    return COMPLETE not in tree or signature(tree) != tree[COMPLETE]
+
+
+def _adapter_animated(tree, names):
+    prefixes = tuple(n.path_from_id() for n in tree.nodes if n.name in names)
+    def contains(value):
+        if isinstance(value, dict):
+            return (str(value.get('path', '')).startswith(prefixes) if prefixes else False) or any(contains(v) for v in value.values())
+        return isinstance(value, list) and any(contains(v) for v in value)
+    return contains(_animation(tree))
 
 
 def retain_edited_upstream(tree):
     """Strip only our adapter; keep an edited private upstream active on disable."""
     record = json.loads(tree[ADDED])
+    added_names = set(record['nodes'])
+    adapter_edited = (ADAPTER not in tree or signature(tree,
+        [n.name for n in tree.nodes if n.name not in added_names], animation=False) != tree[ADAPTER]
+        or _adapter_animated(tree, added_names))
+    if adapter_edited:
+        # The user now owns this complete stage. Never delete its values,
+        # wiring or animation merely because our scene toggle is disabled.
+        for key in list(tree.keys()):
+            if key.startswith('endf_npr_post_'):
+                del tree[key]
+        tree.name = 'ENDF preserved edited compositor (adapter retained)'
+        return tree
     if record['nodes']:
         nodes = [tree.nodes.get(name) for name in record['nodes']]
         if any(n is None for n in nodes):

@@ -510,6 +510,10 @@ class SORA_PT_panel(bpy.types.Panel):
             from . import equipment
             equipment.draw(box, context)
         wrapped_label(layout, 'Task failed; open error details' if settings.task_error else settings.status, context)
+        for notice_key in ('endf_outline_migration_notice', 'endf_npr_post_notice'):
+            notice = context.scene.get(notice_key)
+            if notice:
+                wrapped_label(layout.box(), notice, context)
         if settings.task_error:
             layout.prop(settings, 'diagnostics')
             if settings.diagnostics:

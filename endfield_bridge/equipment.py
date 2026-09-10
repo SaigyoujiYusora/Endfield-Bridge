@@ -1,5 +1,6 @@
 """Instance-owned equipment assembly from explicit Core attachment contracts."""
 import json
+import math
 import bpy
 from bpy.props import StringProperty
 from mathutils import Matrix
@@ -13,6 +14,33 @@ STATE='sora_equipment_state'
 
 def mat(values):return Matrix([values[r*4:r*4+4] for r in range(4)])
 def flatten(value):return [float(value[r][c]) for r in range(4) for c in range(4)]
+
+
+def apply_initial_equipment_pose(rig,resource):
+    """Apply Core's source-derived initial pose only to a newly created child rig."""
+    pose=resource.get('defaultPose')
+    if pose is None:return
+    if rig is None or pose.get('time')!=0 or pose.get('status')!='native-controller-default-at-zero':
+        raise ValueError('Invalid native initial equipment pose')
+    if rig.animation_data and (rig.animation_data.action or rig.animation_data.nla_tracks):
+        raise ValueError('Initial equipment pose cannot overwrite an existing Action')
+    sources=resource['scene']['bones'];rows=pose.get('bones',[])
+    if len(rows)!=len(sources) or {r.get('bone') for r in rows}!=set(range(len(sources))):
+        raise ValueError('Initial equipment pose bone coverage differs from its scene')
+    checked=[]
+    for row in rows:
+        source=sources[row['bone']];bone=rig.pose.bones.get(source['name']);values=row.get('basisMatrix')
+        if bone is None or bone.bone.get('sora_source_path')!=row.get('sourcePath') or source.get('sourcePath')!=row.get('sourcePath'):
+            raise ValueError('Initial equipment pose source bone identity differs')
+        if not isinstance(values,list) or len(values)!=16 or not all(isinstance(v,(float,int)) and math.isfinite(v) for v in values):
+            raise ValueError('Initial equipment pose matrix is invalid')
+        target=mat(values);location,rotation,scale=target.decompose()
+        rebuilt=Matrix.LocRotScale(location,rotation,scale)
+        if max(abs(target[r][c]-rebuilt[r][c]) for r in range(4) for c in range(4))>0.0001:
+            raise ValueError('Initial equipment pose contains unsupported shear')
+        checked.append((bone,target))
+    for bone,target in checked:bone.matrix_basis=target
+    rig['sora_equipment_default_pose']=json.dumps({k:v for k,v in pose.items() if k!='bones'})
 
 
 def owner_collection(context):
@@ -131,6 +159,7 @@ def create_dedicated_steps(context,collection,rig,assembly,material_mode=None,st
             resource=resources[slot['resourceId']]
             child,child_rig=yield from create_scene_steps(context,resource['scene'],material_mode)
             created.append(child)
+            apply_initial_equipment_pose(child_rig,resource)
             collection.children.link(child)
             context.scene.collection.children.unlink(child)
             child['sora_owner_collection']=collection
