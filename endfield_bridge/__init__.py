@@ -194,6 +194,47 @@ def database_complete(settings, context, operation, has_database, result):
     settings.source_details = True
     version = str(result.get('gameVersion') or result.get('version') or 'version unreported')
     if operation == 'game-validate':
+        compatibility = result.get('databaseCompatibility')
+        if has_database and compatibility is not None and (
+                not isinstance(compatibility, dict)
+                or type(compatibility.get('contractVersion')) is not int
+                or compatibility['contractVersion'] != 1
+                or compatibility.get('mode') not in {'standalone-scene', 'indexed-game', 'legacy-snapshot'}):
+            raise CoreError('Unknown database compatibility contract; update Sora-Core and validate again')
+        if has_database and isinstance(compatibility, dict):
+            count, total = compatibility.get('cachedSceneCount'), compatibility.get('assetCount')
+            if (type(count) is not int or type(total) is not int or not 0 <= count <= total
+                    or not all(type(compatibility.get(key)) is bool for key in (
+                        'allAssetsHaveCachedScenes', 'canImportCachedScenes', 'canResolveIndexedAssets', 'versionMatches'))
+                    or compatibility['allAssetsHaveCachedScenes'] != (total > 0 and count == total)
+                    or not isinstance(compatibility.get('databaseVersion'), str)):
+                raise CoreError('Incomplete database compatibility status; update Sora-Core and validate again')
+            indexed = compatibility['mode'] == 'indexed-game'
+            matched_index = indexed and result.get('matches') is True
+            if (compatibility['canResolveIndexedAssets'] != matched_index
+                    or compatibility['canImportCachedScenes'] != (count > 0 and (not indexed or matched_index))
+                    or (not indexed and compatibility['mode'] != ('standalone-scene' if count > 0 else 'legacy-snapshot'))):
+                raise CoreError('Inconsistent database compatibility status; update Sora-Core and validate again')
+        if has_database and isinstance(compatibility, dict) and compatibility.get('mode') == 'standalone-scene':
+            count = compatibility.get('cachedSceneCount')
+            total = compatibility.get('assetCount')
+            complete = compatibility.get('allAssetsHaveCachedScenes')
+            if (type(compatibility.get('contractVersion')) is not int or compatibility['contractVersion'] != 1
+                    or type(count) is not int or type(total) is not int or not 0 < count <= total
+                    or type(complete) is not bool or complete != (count == total)
+                    or compatibility.get('canImportCachedScenes') is not True
+                    or compatibility.get('canResolveIndexedAssets') is not False
+                    or type(compatibility.get('versionMatches')) is not bool
+                    or not isinstance(compatibility.get('databaseVersion'), str)):
+                raise CoreError('Incomplete standalone compatibility status; update Sora-Core and validate again')
+            comparison = 'version labels equal; resource match unverified' if compatibility['versionMatches'] else 'game version differs'
+            settings.status = (f'Standalone Scene compatibility: {count}/{total} cached scenes; '
+                f'database {compatibility["databaseVersion"]}, game {version}: {comparison}. '
+                'Cached scenes import independently; native resource associations unverified. No indexed on-demand parsing or full-game coverage. '
+                + ('All asset records have cached scenes.' if complete else 'Uncached records cannot be imported; build a matching unified index.'))
+            return
+        if has_database and isinstance(compatibility, dict) and compatibility.get('mode') == 'legacy-snapshot':
+            raise CoreError('Legacy snapshot has no cached scenes or verified unified index; build a matching unified database')
         if result.get('matches') is False:
             settings.status = 'Game/database version mismatch; update or rebuild the database before importing'
             raise CoreError(settings.status)

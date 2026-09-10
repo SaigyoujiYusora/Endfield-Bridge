@@ -523,7 +523,7 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
         _restore_face_mask(old_face_mask)
         _restore_properties(rig, previous_override)
         if animation is not None:
-            bind_action(rig,previous_action,previous_slot,select_slot=previous_slot is not None)
+            bind_action(rig,previous_action,previous_slot,select_slot=True)
         else:
             rig.animation_data_clear()
         bpy.data.actions.remove(action)

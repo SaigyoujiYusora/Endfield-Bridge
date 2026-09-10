@@ -154,8 +154,9 @@ def restore(context, rig):
     if any(not nla[name].mute for name,_ in state['nla']) or any(not drivers[(p,a)].mute for p,a,_ in state['drivers']):
         raise ValueError('Suspended NLA or driver mute state was changed; restore state retained')
     saved_action=rig.get(ACTION)
-    saved_slot=next((s for s in saved_action.slots if s.identifier==state['slot']),None) if saved_action and state['slot'] else None
-    if saved_action and state['slot'] and saved_slot is None:
+    saved_slot_identifier=state.get('slot')
+    saved_slot=next((s for s in saved_action.slots if s.identifier==saved_slot_identifier),None) if saved_action and saved_slot_identifier else None
+    if saved_action and saved_slot_identifier and saved_slot is None:
         raise ValueError('Suspended Action slot was removed; restore state retained')
     if state.get('rootChannels') is not None:
         validate_root_channels(rig,state['rootChannels'])
@@ -166,7 +167,9 @@ def restore(context, rig):
         bone.matrix_basis = matrix(saved['basis'])
     restore_root(rig,state)
     if animation:
-        bind_action(rig,rig.get(ACTION),state['slot'],select_slot=bool(state['slot']))
+        # Explicit null preserves an inactive Action; absent legacy metadata
+        # retains Blender's automatic slot selection.
+        bind_action(rig,rig.get(ACTION),saved_slot_identifier,select_slot='slot' in state)
         for name, mute in state['nla']: nla[name].mute = mute
         for path, axis, mute in state['drivers']: drivers[(path,axis)].mute = mute
     for constraint,mute in constraints: constraint.mute = mute

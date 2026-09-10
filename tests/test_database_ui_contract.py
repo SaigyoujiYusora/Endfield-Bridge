@@ -14,6 +14,49 @@ def settings(database='test.sredb'):
     return NS(game_root='game',database=database,assets=['stale'],selected=0,result_database='old',offset=30,total=99,source_details=False,status='Imported old asset')
 
 class DatabaseUiContractTests(unittest.TestCase):
+    def compatibility(self, **changes):
+        result = dict(contractVersion=1, mode='standalone-scene', databaseVersion='v1',
+            versionMatches=True, assetCount=1, cachedSceneCount=1, allAssetsHaveCachedScenes=True,
+            canImportCachedScenes=True, canResolveIndexedAssets=False)
+        result.update(changes)
+        return result
+    def test_standalone_validation_reports_cached_compatibility_without_claiming_match(self):
+        for same_version in (True, False):
+            value=settings()
+            ns['database_complete'](value,None,'game-validate',True,dict(version='v2',matches=False,
+                databaseCompatibility=self.compatibility(versionMatches=same_version)))
+            self.assertIn('1/1 cached scenes',value.status)
+            self.assertIn('resource match unverified' if same_version else 'game version differs',value.status)
+            self.assertTrue(value.source_details)
+            self.assertEqual(value.selected,-1)
+    def test_partial_standalone_does_not_claim_complete_import(self):
+        value=settings()
+        ns['database_complete'](value,None,'game-validate',True,dict(matches=False,
+            databaseCompatibility=self.compatibility(assetCount=2,allAssetsHaveCachedScenes=False)))
+        self.assertIn('Uncached records cannot be imported',value.status)
+    def test_unknown_or_incomplete_compatibility_fails_closed(self):
+        for changes in ({'contractVersion':2},{'contractVersion':True},{'mode':'future'},
+                {'cachedSceneCount':0},{'assetCount':0},{'allAssetsHaveCachedScenes':False},
+                {'canImportCachedScenes':False},{'canResolveIndexedAssets':True},{'versionMatches':None}):
+            with self.subTest(changes=changes),self.assertRaises(RuntimeError):
+                ns['database_complete'](settings(),None,'game-validate',True,dict(matches=False,
+                    databaseCompatibility=self.compatibility(**changes)))
+    def test_legacy_snapshot_and_mismatched_index_remain_blocked(self):
+        for mode in ('legacy-snapshot','indexed-game'):
+            with self.assertRaises(RuntimeError):
+                ns['database_complete'](settings(),None,'game-validate',True,dict(matches=False,
+                    databaseCompatibility=self.compatibility(mode=mode)))
+    def test_complete_matched_index_keeps_existing_success(self):
+        value=settings()
+        ns['database_complete'](value,None,'game-validate',True,dict(version='v1',matches=True,
+            databaseCompatibility=self.compatibility(mode='indexed-game',canResolveIndexedAssets=True)))
+        self.assertIn('Game/database matched',value.status)
+    def test_missing_field_cannot_bypass_index_validation(self):
+        for field in self.compatibility():
+            contract=self.compatibility(mode='indexed-game',canResolveIndexedAssets=True)
+            del contract[field]
+            with self.subTest(field=field),self.assertRaises(RuntimeError):
+                ns['database_complete'](settings(),None,'game-validate',True,dict(matches=True,databaseCompatibility=contract))
     def test_validated_budget_and_compact_lines(self):
         value=settings()
         ns['database_complete'](value,None,'database-build',True,{'gameVersion':'v9','assets':4321,'formatVersion':3,'payloadBytes':240649994,'maxPayloadBytes':268435456})
