@@ -115,7 +115,7 @@ def create_scene_steps(context, document, material_mode=None):
             armature.display_type = "STICK"
             rig.show_in_front = True
             from .pose_controls import record_import_pose
-            record_import_pose(rig)
+            record_import_pose(rig, document.get('faceDriver'))
         mesh_sources = document["meshes"]
         for mesh_index, source in enumerate(mesh_sources):
             yield {"stage": "Creating meshes", "completed": mesh_index, "total": len(mesh_sources)}

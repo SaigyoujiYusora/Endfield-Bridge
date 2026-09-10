@@ -67,9 +67,69 @@ def restore_root(rig, state):
         setattr(rig,key,saved['channels'][key])
 
 
-def record_import_pose(rig):
-    rig[IMPORT] = json.dumps({b.name: {'basis':matrix_list(b.matrix_basis), 'mode':b.rotation_mode}
-                              for b in rig.pose.bones})
+def record_import_pose(rig, face_descriptor=None):
+    rig[IMPORT] = json.dumps({'version':2, 'bones':{
+        b.name: {'basis':matrix_list(b.matrix_basis), 'mode':b.rotation_mode,
+                 'path':b.bone.get('sora_source_path'), 'hash':b.bone.get('sora_source_hash'),
+                 'index':b.bone.get('sora_source_index'), 'rest':matrix_list(b.bone.matrix_local)}
+        for b in rig.pose.bones},
+        'facePaths':([b['nativePath'] for b in face_descriptor['bones']]
+                     if face_descriptor is not None else None)})
+
+
+def import_bones(rig):
+    data = json.loads(rig[IMPORT])
+    versioned = data.get('version') == 2
+    records = data['bones'] if versioned else data
+    if not isinstance(records,dict) or not records:
+        raise ValueError('Initial pose record is empty or invalid; reimport this instance')
+    result = {}
+    for name,saved in records.items():
+        if versioned:
+            matches = [b for b in rig.pose.bones
+                       if (b.bone.get('sora_source_path') == saved['path'] if saved['path']
+                           else b.bone.get('sora_source_index') == saved['index'])
+                       and b.bone.get('sora_source_hash') == saved['hash']]
+            if len(matches) != 1:
+                raise ValueError('Initial pose source identity is missing or ambiguous: ' + name)
+            bone = matches[0]
+            if matrix_list(bone.bone.matrix_local) != saved['rest']:
+                raise ValueError('Initial pose rest frame changed; reimport or restore the original skeleton')
+        else:
+            bone = rig.pose.bones.get(name)
+            if bone is None:
+                raise ValueError('Legacy initial pose bone was renamed or removed: ' + name)
+        if bone.name in result:
+            raise ValueError('Initial pose contains duplicate bone identities')
+        values = saved.get('basis')
+        if (not isinstance(values,list) or len(values) != 16 or
+            any(type(v) not in (int,float) or not math.isfinite(v) for v in values) or
+            saved.get('mode') not in {'QUATERNION','AXIS_ANGLE','XYZ','XZY','YXZ','YZX','ZXY','ZYX'}):
+            raise ValueError('Initial pose transform is invalid: ' + name)
+        result[bone.name] = saved
+    return data,result
+
+
+def original_body_names(rig, data, records):
+    from . import face_controls
+    if face_controls.DATA in rig:
+        descriptor = json.loads(rig[face_controls.DATA])
+        facial = {b.name for b in face_controls._native_bones(rig,descriptor)}
+    elif data.get('version') == 2 and data.get('facePaths') is not None:
+        facial = set()
+        for path in data['facePaths']:
+            matches = [b.name for b in rig.pose.bones if b.bone.get('sora_source_path') == path]
+            if not path or len(matches) != 1:
+                raise ValueError('Recorded Face Driver bone identity is missing or ambiguous')
+            facial.add(matches[0])
+    elif MAP in rig:
+        return {b.name for b in resolve(rig,json.loads(rig[MAP])).values()}
+    else:
+        raise ValueError('Cannot separate body and face: native Face Driver bone identities or verified body mapping are required')
+    names = set(records) - facial
+    if not names:
+        raise ValueError('No recorded body bones remain after excluding native facial bones')
+    return names
 
 
 def resolve(rig, descriptor):
@@ -192,19 +252,23 @@ def aim(context, bone, child, direction):
 def apply_pose(context, rig, mode):
     if IMPORT not in rig:
         raise ValueError('Reimport this instance to record its initial pose')
-    body = resolve(rig,json.loads(rig[MAP])) if MAP in rig else None
     if mode not in {'ORIGINAL','A','T'}:
         raise ValueError('Unknown body pose')
-    if body is None:
+    data,records = import_bones(rig)
+    body = resolve(rig,json.loads(rig[MAP])) if mode in {'A','T'} and MAP in rig else None
+    if mode in {'A','T'} and body is None:
         raise ValueError('Load and validate native humanoid mapping first')
+    body_names = (original_body_names(rig,data,records) if mode == 'ORIGINAL'
+                  else {bone.name for bone in body.values()})
+    if not body_names.issubset(records):
+        raise ValueError('Initial pose is missing verified body bones; reimport this instance')
     previous = snapshot(rig)
     already = STATE in rig
     try:
         suspend(context,rig)
-        # Only verified native body slots are reset. Facial bones, finger
-        # controls, Shape Keys and their custom-property values are untouched.
-        body_names={bone.name for bone in body.values()}
-        for name,saved in json.loads(rig[IMPORT]).items():
+        # ORIGINAL restores recorded non-facial bones; A/T changes only native
+        # body slots. Shape Keys and face custom properties remain untouched.
+        for name,saved in records.items():
             if name in body_names:
                 bone=rig.pose.bones[name]
                 bone.rotation_mode=saved['mode']
@@ -269,6 +333,8 @@ class SORA_OT_pose(bpy.types.Operator):
         rig=target(context)
         try:
             if rig is None: raise ValueError('Select an imported character armature')
+            if context.mode != 'OBJECT': raise ValueError('Switch to Object Mode before changing body pose')
+            if tasks.busy(): raise ValueError('Wait for the current loading task before changing body pose')
             if self.mode=='RESUME': restore(context,rig)
             else: apply_pose(context,rig,self.mode)
             return {'FINISHED'}
@@ -341,10 +407,10 @@ def draw(layout,context):
     rig=target(context)
     layout.operator('sora.pose_mapping')
     row=layout.row(align=True)
-    row.enabled=rig is not None and IMPORT in rig and MAP in rig
+    row.enabled=rig is not None and IMPORT in rig
     row.operator('sora.body_pose',text='Original body').mode='ORIGINAL'
-    row=row.row(align=True)
-    row.enabled=rig is not None and MAP in rig
+    row=layout.row(align=True)
+    row.enabled=rig is not None and IMPORT in rig and MAP in rig
     row.operator('sora.body_pose',text='A Pose').mode='A'
     row.operator('sora.body_pose',text='T Pose').mode='T'
     if rig and STATE in rig: layout.operator('sora.body_pose',text='Restore animation').mode='RESUME'

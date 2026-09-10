@@ -45,6 +45,7 @@ def _attach(operator, context, method, complete, task):
     operator._closed = False
     operator._window_manager = context.window_manager
     operator._task = task
+    operator._database_build = method == 'database-build'
     operator._complete = complete
     operator._steps = None
     operator._cancelled = False
@@ -100,6 +101,12 @@ def _finish(operator, context, error=None):
         return {'CANCELLED'}
     operator._closed = True
     errors = [str(error)] if error else []
+    if errors and getattr(operator, '_database_build', False):
+        terminal = getattr(operator._task, 'terminal', None)
+        if terminal is None or type(terminal.get('committed')) is not bool:
+            errors.append('Database commit outcome unknown; reload the database to verify. No rollback is claimed')
+        elif terminal.get('committed') is True:
+            errors.append('Database replacement committed; cancellation cannot roll it back')
     try:
         if operator._steps:
             try:
@@ -113,6 +120,10 @@ def _finish(operator, context, error=None):
             try:
                 operator._task.cancel()
                 operator._task.terminate()
+                if getattr(operator, '_database_build', False):
+                    cleanup = getattr(operator._task, 'temporary_cleanup', None)
+                    if cleanup:
+                        errors.append(cleanup)
             except Exception as cleanup_error:
                 errors.append('process cleanup: ' + str(cleanup_error))
         try:
@@ -158,9 +169,11 @@ class TaskOperator:
                     or context.view_layer != self._view_layer or context.mode != self._mode):
                 self._cancelled = True
                 return _finish(self, context, 'Scene, window, view layer or mode changed; task cancelled')
-            if self._cancelled and (self._steps is not None or self._task.process.poll() is not None):
+            if self._cancelled and not getattr(self, '_database_build', False) and (self._steps is not None or self._task.process.poll() is not None):
                 return _finish(self, context, 'Cancelled; unfinished import rolled back')
-            if self._cancelled and time.monotonic() - self._cancel_time > 3:
+            if (self._cancelled and time.monotonic() - self._cancel_time > 3
+                    and not (getattr(self, '_database_build', False)
+                             and (getattr(self._task, 'terminal', None) or {}).get('committed') is True)):
                 self._task.terminate()
                 return _finish(self, context, 'Cancelled')
             if self._steps is not None:
@@ -186,7 +199,7 @@ class TaskOperator:
                         settings.task_completed = message.get('completed') or 0
                         settings.task_total = message.get('total') or 0
                     elif message.get('ok'):
-                        if self._cancelled:
+                        if self._cancelled and not (getattr(self, '_database_build', False) and message.get('committed') is True):
                             return _finish(self, context, 'Cancelled')
                         with context.temp_override(**self._override):
                             self._steps = self._complete(message['result'])

@@ -267,6 +267,7 @@ class SORA_OT_equipment_animation_import(TaskOperator,bpy.types.Operator):
     bl_idname='sora.equipment_animation_import'
     bl_label='加载专用装备片段'
     bl_options={'REGISTER','UNDO'}
+    align_body_event:BoolProperty(default=False)
     def execute(self,context):
         try:
             settings=context.scene.sora_equipment_animation
@@ -277,18 +278,22 @@ class SORA_OT_equipment_animation_import(TaskOperator,bpy.types.Operator):
             contract.validate_discovery([selected],dict(expected,manifestHash=selected['equipment'].get('manifestHash')))
             parameters=dict(parameters,selection={'cab':selected['cab'],'pathId':selected['pathId']})
             initial=capture(rig);timing=timeline_state(context)
+            from .equipment_event_alignment import mapping as event_mapping
+            aligned=event_mapping(owner,eq.owner_rig(owner),selected,timing[0]/timing[1]) if self.align_body_event else None
             def check():
                 require_backend(context)
                 paused(context,rig)
                 if selection(context)[-1]!=signature or timeline_state(context)!=timing:raise ValueError('装备目标或时间轴已改变；未覆盖新的用户状态')
                 if not 0<=settings.selected_clip<len(settings.clips) or json.loads(settings.clips[settings.selected_clip].metadata_json)!=selected:raise ValueError('片段选择已改变')
                 if capture(rig)!=initial:raise ValueError('装备姿势或 Action 已编辑；保留新状态')
+                if aligned is not None and event_mapping(owner,eq.owner_rig(owner),selected,timing[0]/timing[1])!=aligned:
+                    raise ValueError('身体动作或原生事件已改变；未应用装备片段')
             def complete(result):
                 check()
                 current_expected=dict(expected,manifestHash=contract.catalog_manifest(result['catalog']))
                 clip,bones,proof=contract.validate_import(result['clip'],current_expected,selected,live_bones(rig),bool(child.get('sora_render_canonical')))
                 from .animation_actions import apply_clip_steps
-                mapping={'fps':timing[0]/timing[1],'origin':timing[4]+timing[5]}
+                mapping=aligned or {'fps':timing[0]/timing[1],'origin':timing[4]+timing[5]}
                 frames=contract.frame_grid(proof['times'],mapping['fps'],mapping['origin'])
                 factory=lambda:apply_clip_steps(context,rig,clip,[bone['name'] for bone in bones],bone_sources=bones,
                                                 keep_face_controls=True,timeline=mapping)
@@ -296,6 +301,7 @@ class SORA_OT_equipment_animation_import(TaskOperator,bpy.types.Operator):
                 action['sora_equipment_clip_proof']=json.dumps(proof,separators=(',',':'))
                 action['sora_equipment_frame_grid']=json.dumps(frames,separators=(',',':'))
                 action['sora_equipment_slot']=expected['slotId']
+                if aligned is not None:action['sora_body_event_alignment']=json.dumps(aligned['proof'],separators=(',',':'))
                 end=mapping['origin']+clip['duration']*mapping['fps']
                 settings.status=f"已加载 {clip['name']}：帧 {mapping['origin']:g}–{end:g}；源 {clip['fps']:g} Hz，时间轴 {mapping['fps']:g} fps"
                 if end>context.scene.frame_end:settings.status+='；片段超出场景结束帧，可按需调整'
@@ -327,6 +333,7 @@ def draw(layout,context):
     body.template_list('UI_UL_list','equipment_animation_clips',settings,'clips',settings,'selected_clip',rows=4)
     load=body.row();load.enabled=bool(settings.result_signature) and 0<=settings.selected_clip<len(settings.clips)
     load.operator('sora.equipment_animation_import')
+    load.operator('sora.equipment_animation_import',text='按身体源事件时间加载').align_body_event=True
     current_rig=None
     if 0<=settings.selected_source<len(settings.sources):
         slot_id=settings.sources[settings.selected_source].slot_id

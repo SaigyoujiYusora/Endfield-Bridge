@@ -23,6 +23,11 @@ class FakeProcess:
 
 
 class TaskClientTests(unittest.TestCase):
+    def test_commit_terminal_is_retained_for_late_cancel(self):
+        event={'protocol':1,'id':'known','ok':True,'committed':True,'result':{'assets':3}}
+        task=self.run_task([event])
+        self.assertEqual(task.events.get(timeout=2),event)
+        self.assertEqual(task.terminal,event)
     def run_task(self, events):
         process = FakeProcess(events)
         with patch.object(client.subprocess, 'Popen', return_value=process), patch('uuid.uuid4', return_value=types.SimpleNamespace(hex='known')):

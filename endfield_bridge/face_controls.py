@@ -53,6 +53,8 @@ def install(rig, descriptor, bones):
         rig.id_properties_ui(prop).update(soft_min=0.0, soft_max=1.0,
                                         description=control['name'])
     rig.update_tag()
+    from . import face_browser
+    face_browser.refresh(rig)
 
 
 @functools.lru_cache(maxsize=32)
@@ -366,13 +368,22 @@ class SORA_OT_face_preset(bpy.types.Operator):
     bl_label = 'Apply Face Preset'
     bl_options = {'REGISTER', 'UNDO'}
     index: bpy.props.IntProperty(default=-1)
+    identity: bpy.props.StringProperty(default='')
 
     def execute(self, context):
         rig = rig_for(context.object)
         if rig is None:
             return {'CANCELLED'}
         data = descriptor(rig[DATA])
+        if self.index >= len(data['presets']):
+            self.report({'ERROR'}, 'Preset list changed; refresh the face browser')
+            return {'CANCELLED'}
         preset = data['presets'][self.index] if self.index >= 0 else None
+        if self.identity:
+            from .face_browser import preset_identity
+            if preset is None or preset_identity(preset) != self.identity:
+                self.report({'ERROR'}, 'Native preset identity changed; refresh the face browser')
+                return {'CANCELLED'}
         if preset and preset['missingControls']:
             self.report({'ERROR'}, 'Preset has controls absent from this character')
             return {'CANCELLED'}
@@ -397,29 +408,8 @@ def draw(layout, context):
         layout.operator('sora.face_shader_toggle', text='Disable shader controls' if rig.get(face_shader.ENABLED) else 'Enable shader controls')
     if rig.get(face_shader.ERROR):
         layout.label(text=rig[face_shader.ERROR], icon='ERROR')
-    layout.prop(context.scene.sora, 'face_filter', text='Filter')
-    query = context.scene.sora.face_filter.lower()
-    settings = context.scene.sora
-    controls = [(i, control) for i, control in enumerate(data['controls'])
-                if (not query or query in control['name'].lower())
-                and (not settings.face_modified or abs(rig.get(property_name(i), 0.0)) > 1e-6)]
-    layout.prop(settings, 'face_modified')
-    layout.prop(settings, 'face_index', text=f'Control (0-{max(0, len(controls)-1)})')
-    if controls:
-        i, control = controls[min(settings.face_index, len(controls)-1)]
-        row = layout.row()
-        row.enabled = not control.get('shader') or bool(rig.get(face_shader.ENABLED))
-        row.prop(rig, '["' + property_name(i) + '"]', text=control['name'], slider=True)
-    else:
-        layout.label(text='No matching controls')
-    presets = [(i, preset) for i, preset in enumerate(data['presets'])
-               if not query or query in preset['name'].lower()]
-    if presets:
-        layout.prop(settings, 'face_preset_index', text=f'Preset (0-{len(presets)-1})')
-        i, preset = presets[min(settings.face_preset_index, len(presets)-1)]
-        row = layout.row()
-        row.enabled = not preset['missingControls']
-        row.operator('sora.face_preset', text=preset['name']).index = i
+    from . import face_browser
+    face_browser.draw(layout, context, rig, data)
     return True
 
 
@@ -475,14 +465,17 @@ def rebind_owned_after_load():
 def _load_rebind_timer():
     # One shot, after all load_post callbacks have installed their namespaces.
     if bpy.app.driver_namespace.get('sora_f') is component:
+        from . import face_browser
+        face_browser.refresh_all()
         if rebind_owned_after_load() and bpy.context.view_layer is not None:
             bpy.context.view_layer.update()
     return None
 
 
 def register():
-    from . import face_shader
+    from . import face_shader, face_browser
     face_shader.register()
+    face_browser.register()
     for cls in (SORA_OT_face_toggle, SORA_OT_face_preset):
         bpy.utils.register_class(cls)
     if loaded not in bpy.app.handlers.load_post:
@@ -509,3 +502,5 @@ def unregister():
     _rig_cache.clear()
     for cls in reversed((SORA_OT_face_toggle, SORA_OT_face_preset)):
         bpy.utils.unregister_class(cls)
+    from . import face_browser
+    face_browser.unregister()

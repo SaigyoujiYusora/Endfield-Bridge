@@ -11,6 +11,7 @@ from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringPrope
 from .client import CoreError, request
 from .scene import apply_clip, create_scene, create_scene_steps, remove_scene
 from . import tasks
+from . import library_ui
 from .tasks import TaskOperator
 
 
@@ -80,7 +81,7 @@ def invalidate(self, context):
 
 
 def invalidate_source(self, context):
-    invalidate(self, context)
+    library_ui.source_changed(self)
     self.payload_bytes = -1
     self.max_payload_bytes = 0
     self.database_format_version = 0
@@ -125,8 +126,12 @@ class SORA_Settings(bpy.types.PropertyGroup):
     database_format_version: IntProperty(default=0, min=0)
     budget_database: StringProperty()
     source_details: BoolProperty(name="Data source settings", default=True)
-    category: EnumProperty(name="Library", items=[('PEOPLE','人物',''),('ITEMS','物品',''),('SCENES','场景','')], update=invalidate)
-    kind: EnumProperty(name="Type", items=[('character','角色',''),('npc','NPC','')], update=invalidate)
+    category: EnumProperty(name="Library", items=[('PEOPLE','人物',''),('ITEMS','物品',''),('SCENES','场景','')], update=library_ui.switch_page)
+    kind: EnumProperty(name="Type", items=[('character','角色',''),('npc','NPC','')], update=library_ui.switch_page)
+    library_pages: StringProperty(default='{}', options={'SKIP_SAVE'})
+    library_page: StringProperty(default='character', options={'SKIP_SAVE'})
+    library_switching: BoolProperty(default=False, options={'SKIP_SAVE'})
+    asset_details: BoolProperty(name='资源详情', default=False, update=library_ui.details_changed)
     function_page: EnumProperty(name="Instance", items=[('POSE','姿势',''),('ANIMATION','动画',''),('FACE','表情',''),('EQUIPMENT','装备',''),('MATERIAL','材质','')])
     offset: IntProperty(default=0, min=0)
     total: IntProperty(default=0)
@@ -138,7 +143,7 @@ class SORA_Settings(bpy.types.PropertyGroup):
     task_total: IntProperty(default=0)
     task_error: StringProperty()
     diagnostics: BoolProperty(name="Error details", default=False)
-    query: StringProperty(name="Search", update=invalidate)
+    query: StringProperty(name="Search", update=library_ui.query_changed)
     result_database: StringProperty()
     assets: CollectionProperty(type=SORA_AssetRow)
     selected: IntProperty(default=0)
@@ -275,6 +280,7 @@ class SORA_OT_search(TaskOperator, bpy.types.Operator):
     direction: IntProperty(default=0)
     def execute(self, context):
         settings = context.scene.sora
+        library_ui.remember(settings)
         database = bpy.path.abspath(settings.database)
         root = bpy.path.abspath(settings.game_root) if settings.game_root else ''
         signature = (settings.database, settings.game_root, settings.query, settings.category, settings.kind)
@@ -305,7 +311,7 @@ class SORA_OT_search(TaskOperator, bpy.types.Operator):
                     row.reason = capability.get('reason', 'Cached scene' if row.has_scene else 'No supported scene parser')
                     row.kind = source.get('kind', '')
                 settings.result_database = database
-                settings.selected = 0 if settings.assets else -1
+                library_ui.restore_selection(settings)
                 settings.offset = offset
                 settings.total = result['total']
                 settings.source_details = False
@@ -391,24 +397,50 @@ class SORA_OT_import(TaskOperator, bpy.types.Operator):
 class SORA_OT_instance(bpy.types.Operator):
     bl_idname = 'sora.select_instance'
     bl_label = 'Next imported instance'
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and not tasks.busy()
     def execute(self, context):
-        roots = [c for c in bpy.data.collections if c.get('sora_instance') and not c.get('sora_owner_collection')
-                 and any(o.name in context.view_layer.objects and o.visible_get(view_layer=context.view_layer) for o in c.objects)]
+        roots = library_ui.visible_roots(context)
         if not roots:
             return {'CANCELLED'}
         from .equipment import owner_collection
         current = owner_collection(context)
         index = next((i for i, c in enumerate(roots) if c == current), -1)
         collection = roots[(index + 1) % len(roots)]
-        visible = [o for o in collection.objects if o.name in context.view_layer.objects and o.visible_get(view_layer=context.view_layer)]
-        obj = next((o for o in visible if o.type == 'ARMATURE' and not o.get('sora_display_source')), visible[0])
-        if context.mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
-        for selected in context.selected_objects:
-            selected.select_set(False)
-        obj.select_set(True)
-        context.view_layer.objects.active = obj
-        return {'FINISHED'}
+        try:
+            library_ui.select(context,collection['sora_instance'])
+            return {'FINISHED'}
+        except ValueError as error:
+            self.report({'ERROR'},str(error))
+            return {'CANCELLED'}
+
+
+class SORA_OT_instance_search(bpy.types.Operator):
+    bl_idname = 'sora.find_instance'
+    bl_label = '搜索 / 选择导入实例'
+    bl_property = 'instance'
+    instance: EnumProperty(name='当前场景实例', items=library_ui.instance_items)
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and not tasks.busy()
+
+    def invoke(self, context, event):
+        if not library_ui.visible_roots(context):
+            self.report({'INFO'},'当前场景没有可见的导入实例')
+            return {'CANCELLED'}
+        self._instance_choices = library_ui.instance_items(self,context)
+        context.window_manager.invoke_search_popup(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        try:
+            library_ui.select(context,self.instance)
+            return {'FINISHED'}
+        except ValueError as error:
+            self.report({'ERROR'},str(error))
+            return {'CANCELLED'}
 
 
 class SORA_OT_stick(bpy.types.Operator):
@@ -549,19 +581,28 @@ class SORA_PT_panel(bpy.types.Panel):
             following.operator('sora.search', text='', icon='TRIA_RIGHT').direction = 1
             if 0 <= settings.selected < len(settings.assets):
                 asset = settings.assets[settings.selected]
-                wrapped_label(box, '中文: ' + (asset.display_zh or ('当前数据库未提供中文映射' if not asset.localization_status or asset.localization_status == 'missing-translation' else '此条目中文映射不可用')), context)
-                wrapped_label(box, '内部: ' + asset.internal_name, context)
-                if asset.resource_path: wrapped_label(box, asset.resource_path, context)
-                wrapped_label(box, asset.detail, context)
-                wrapped_label(box, asset.reason, context)
+                box.label(text='中文: ' + (asset.display_zh or '中文映射不可用'))
+                box.label(text='内部: ' + asset.internal_name)
+                box.label(text='可导入' if asset.can_attempt_import else '不可导入：展开详情查看原因',
+                          icon='CHECKMARK' if asset.can_attempt_import else 'INFO')
+                box.prop(settings, 'asset_details', icon='DISCLOSURE_TRI_DOWN' if settings.asset_details else 'DISCLOSURE_TRI_RIGHT')
+                if settings.asset_details:
+                    if asset.resource_path: wrapped_label(box, asset.resource_path, context)
+                    wrapped_label(box, asset.detail, context)
+                    wrapped_label(box, asset.reason, context)
+            box.prop(settings, 'material_mode', text='Import materials')
             box.operator('sora.import_asset')
             reason = import_reason(context)
-            if reason: wrapped_label(box, reason, context)
+            if reason and (settings.asset_details or not 0 <= settings.selected < len(settings.assets)):
+                wrapped_label(box, reason, context)
         box = layout.box()
         wrapped_label(box, '当前实例: ' + instance_name(context), context)
         buttons = box.column(align=True)
         buttons.enabled = not settings.task_running
-        buttons.operator('sora.select_instance')
+        select_row = buttons.row(align=True)
+        select_row.operator_context = 'INVOKE_DEFAULT'
+        select_row.operator('sora.find_instance', icon='VIEWZOOM')
+        select_row.operator('sora.select_instance', text='', icon='TRIA_RIGHT')
         buttons.operator('sora.remove_import')
         box.row(align=True).prop(settings, 'function_page', expand=True)
         box = box.column()
@@ -580,7 +621,6 @@ class SORA_PT_panel(bpy.types.Panel):
         elif settings.function_page == 'MATERIAL':
             from . import render_modes
             render_modes.draw(box, context)
-            box.prop(settings, 'material_mode', text='New imports')
             box.prop(settings, 'npr_post_processing')
             box.label(text='Post-processing affects the entire scene', icon='INFO')
         else:
@@ -599,7 +639,7 @@ class SORA_PT_panel(bpy.types.Panel):
                 wrapped_label(details, settings.task_error, context)
 
 
-CLASSES = (SORA_Preferences, SORA_AssetRow, SORA_Settings, SORA_OT_check, SORA_OT_cancel, SORA_OT_database, SORA_OT_instance, SORA_OT_stick, SORA_OT_search, SORA_OT_import, SORA_OT_remove, SORA_OT_clip, SORA_OT_copy_diagnostics, SORA_UL_assets, SORA_PT_panel)
+CLASSES = (SORA_Preferences, SORA_AssetRow, SORA_Settings, SORA_OT_check, SORA_OT_cancel, SORA_OT_database, SORA_OT_instance, SORA_OT_instance_search, SORA_OT_stick, SORA_OT_search, SORA_OT_import, SORA_OT_remove, SORA_OT_clip, SORA_OT_copy_diagnostics, SORA_UL_assets, SORA_PT_panel)
 
 
 @persistent
@@ -616,11 +656,12 @@ def _migrate_sources_timer():
 
 
 def register():
-    from . import post, ruri_adapter, material_panel, face_controls, animation_panel, pose_controls, render_modes, equipment, generic_weapons, equipment_animation
+    from . import post, ruri_adapter, material_panel, face_controls, animation_panel, pose_controls, equipment, generic_weapons, equipment_animation
     from .registration import RegistrationTransaction
     transaction = RegistrationTransaction(bpy, __package__, (
         (bpy.types.Scene, 'sora'), (bpy.types.Scene, 'sora_animation'), (bpy.types.Scene, 'sora_weapons'),
         (bpy.types.Scene, 'sora_equipment_animation'),
+        (bpy.types.Object, 'sora_face_browser'),
         (bpy.types.WindowManager, 'endf_npr_search')))
     try:
         ruri_adapter.register()
@@ -632,7 +673,6 @@ def register():
         face_controls.register()
         animation_panel.register()
         pose_controls.register()
-        render_modes.register()
         equipment.register()
         generic_weapons.register()
         equipment_animation.register()
@@ -654,11 +694,10 @@ def unregister():
     if migrate_saved_sources in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(migrate_saved_sources)
     tasks.unregister()
-    from . import pose_controls, render_modes, equipment, generic_weapons, equipment_animation
+    from . import pose_controls, equipment, generic_weapons, equipment_animation
     equipment_animation.unregister()
     generic_weapons.unregister()
     equipment.unregister()
-    render_modes.unregister()
     pose_controls.unregister()
     from . import animation_panel
     animation_panel.unregister()

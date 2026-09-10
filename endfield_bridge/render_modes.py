@@ -1,10 +1,7 @@
-"""Reversible material pipelines on an invariant imported geometry frame."""
+"""Import mode metadata and retained cache helpers; no instance-switch operator."""
 import hashlib
 import json
 import bpy
-from bpy.props import StringProperty
-from . import tasks
-from .tasks import TaskOperator
 
 MODE='sora_render_mode'
 SIGNATURE='sora_render_source_signature'
@@ -205,61 +202,6 @@ def switch_tree_steps(context,root,mode,documents):
         raise
 
 
-class SORA_OT_render_mode(TaskOperator,bpy.types.Operator):
-    bl_idname='sora.instance_render_mode'
-    bl_label='Switch instance rendering'
-    bl_options={'REGISTER','UNDO'}
-    mode:StringProperty(default='BASIC')
-    def execute(self,context):
-        if self.mode not in {'RURI','BASIC'}:
-            self.report({'ERROR'},'Unknown render mode');return {'CANCELLED'}
-        collection=selected_collection(context)
-        if collection is None or not collection.get('sora_render_canonical'):
-            self.report({'ERROR'},'Select an instance imported with canonical render-mode support')
-            return {'CANCELLED'}
-        obj=next((o for o in collection.objects if o.get('sora_asset')),None)
-        if obj is None:
-            self.report({'ERROR'},'Instance source identity is missing');return {'CANCELLED'}
-        tree=owned_tree(collection)
-        pending=[c for c in tree if any('sora_render_'+self.mode+'_count' not in o for o in meshes(c))]
-        base={'path':obj['sora_database'],'root':bpy.path.abspath(context.scene.sora.game_root)}
-        jobs=[];keys={}
-        dedicated=[c for c in pending if c.get('sora_equipment_role')=='dedicated']
-        if dedicated:
-            jobs.append({'key':'dedicated','method':'equipment-assembly','params':dict(base,asset=obj['sora_asset'],includeOwner=True)})
-        for current in pending:
-            if current in dedicated:continue
-            if current==collection and dedicated:continue
-            source=next((o for o in current.objects if o.get('sora_asset')),None)
-            if source is None:
-                self.report({'ERROR'},'Owned render source identity is missing');return {'CANCELLED'}
-            key=source['sora_asset'];keys[current.as_pointer()]=key
-            if not any(job['key']==key for job in jobs):jobs.append({'key':key,'method':'scene','params':dict(base,asset=key)})
-        def complete(results):
-            results=results or {};documents={}
-            if 'dedicated' in results:
-                packet=results['dedicated'];documents[collection.as_pointer()]=packet['scene']
-                resources={r['resourceId']:r['scene'] for r in packet['equipment']['resources']}
-                for child in dedicated:documents[child.as_pointer()]=resources[child['sora_equipment_resource']]
-            for pointer,key in keys.items():documents[pointer]=results[key]
-            yield from switch_tree_steps(context,collection,self.mode,documents)
-            context.scene.sora.status='Owned character/equipment render mode: '+self.mode
-        try:
-            if not jobs:return tasks.start_local(self,context,'Cached owned render-tree switch',complete)
-            return tasks.start_batch(self,context,jobs,complete)
-        except Exception as error:
-            self.report({'ERROR'},str(error));return {'CANCELLED'}
-
-
 def draw(layout,context):
     collection=selected_collection(context)
     layout.label(text='Current instance: '+str(collection.get(MODE,'source unavailable') if collection else 'none'))
-    row=layout.row(align=True)
-    row.enabled=collection is not None and bool(collection.get('sora_render_canonical'))
-    row.operator('sora.instance_render_mode',text='NPR').mode='RURI'
-    row.operator('sora.instance_render_mode',text='Basic PBR').mode='BASIC'
-    if collection and not collection.get('sora_render_canonical'):layout.label(text='Reimport to enable reversible modes')
-
-
-def register():bpy.utils.register_class(SORA_OT_render_mode)
-def unregister():bpy.utils.unregister_class(SORA_OT_render_mode)

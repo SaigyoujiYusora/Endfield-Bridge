@@ -43,6 +43,8 @@ class CoreTask:
             raise CoreError('Select an existing Sora-Core executable using its absolute path')
         self.events = queue.Queue()
         self.identity = uuid.uuid4().hex
+        self.temporary_cleanup = None
+        self.terminal = None
         self.process = subprocess.Popen([str(path), 'rpc-task'], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='strict',
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -70,6 +72,7 @@ class CoreTask:
                     self.events.put(event)
                 elif 'ok' in event:
                     final = True
+                    self.terminal = event
                     self.events.put(event)
                 else:
                     raise CoreError('Invalid task event')
@@ -94,7 +97,12 @@ class CoreTask:
 
     def terminate(self):
         if self.process.poll() is None:
+            self.temporary_cleanup = 'Temporary cleanup not confirmed after forced termination'
             self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.temporary_cleanup = 'Process exit not confirmed; temporary preserved'
 
 _sessions = {}
 
