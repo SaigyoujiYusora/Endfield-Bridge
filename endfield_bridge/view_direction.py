@@ -9,7 +9,9 @@ branches remain available for depth and other position-dependent calculations.
 
 REVISION = 'incoming-object-yz-v1'
 STAMP = 'endf_npr_view_direction'
-PARTS = {'Face', 'Eyes', 'Standard', 'Hair'}
+# Each additional part has the same verified s0 camera-minus-surface contract.
+# Crossing X71 alone is not sufficient evidence (Eyes has no such crossing).
+PARTS = {'Face', 'Eyes', 'Standard', 'Hair', 'Fur', 'VFX', 'LiquidAg'}
 PREFIX = 'ENDF Observation '
 
 
@@ -45,7 +47,7 @@ def _swizzle(group, separate_name, combine_name, upstream):
 
 
 def patch_group(group):
-    """Patch only the verified four Character s0 contracts; return change count.
+    """Patch only the explicitly verified Character s0 contracts; return change count.
 
     Call when the adapter obtains an owned library group, before template copies.
     Unexpected contracts fail before mutation rather than guessing node meaning.
