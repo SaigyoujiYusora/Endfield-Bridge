@@ -11,6 +11,9 @@ MAP = 'sora_pose_map'
 IMPORT = 'sora_import_pose'
 STATE = 'sora_pose_resume'
 ACTION = 'sora_pose_resume_action'
+ROOT_CHANNEL_SIZES = {'location':3, 'rotation_euler':3, 'rotation_quaternion':4,
+                      'rotation_axis_angle':4, 'scale':3, 'delta_location':3,
+                      'delta_rotation_euler':3, 'delta_rotation_quaternion':4, 'delta_scale':3}
 
 
 def matrix_list(value):
@@ -19,6 +22,48 @@ def matrix_list(value):
 
 def matrix(value):
     return Matrix([value[r*4:r*4+4] for r in range(4)])
+
+
+def root_parent_frame(rig):
+    return {'parent':rig.parent.name if rig.parent else None,
+            'type':rig.parent_type, 'bone':rig.parent_bone,
+            'vertices':list(rig.parent_vertices)}
+
+
+def root_channels(rig):
+    # Matrix assignment decomposes TRS and can alter an Euler float even when
+    # restoring the same pose. Retain all raw channels, including inactive modes.
+    return {'version':1, 'rotationMode':rig.rotation_mode,
+            'channels':{key:list(getattr(rig,key)) for key in ROOT_CHANNEL_SIZES},
+            'parentFrame':root_parent_frame(rig),
+            'parentInverse':matrix_list(rig.matrix_parent_inverse)}
+
+
+def validate_root_channels(rig, saved):
+    if (not isinstance(saved,dict) or saved.get('version') != 1 or
+        saved.get('rotationMode') not in {'QUATERNION','AXIS_ANGLE','XYZ','XZY','YXZ','YZX','ZXY','ZYX'} or
+        saved.get('parentFrame') != root_parent_frame(rig)):
+        raise ValueError('Suspended root transform frame changed or is invalid; state retained')
+    channels = saved.get('channels',{})
+    for key,size in {**ROOT_CHANNEL_SIZES,'parentInverse':16}.items():
+        values = saved.get(key) if key == 'parentInverse' else channels.get(key)
+        if (not isinstance(values,list) or len(values) != size or
+            any(type(value) not in (int,float) or not math.isfinite(value) for value in values)):
+            raise ValueError('Suspended raw root channels are invalid; state retained')
+
+
+def restore_root(rig, state):
+    saved = state.get('rootChannels')
+    if saved is None:
+        # Older saved pose sessions have no recoverable raw Euler/quaternion
+        # channels. Retain their existing matrix-based compatibility behavior.
+        rig.matrix_basis = matrix(state['rigBasis'])
+        return
+    validate_root_channels(rig,saved)
+    rig.matrix_parent_inverse = matrix(saved['parentInverse'])
+    rig.rotation_mode = saved['rotationMode']
+    for key in ROOT_CHANNEL_SIZES:
+        setattr(rig,key,saved['channels'][key])
 
 
 def record_import_pose(rig):
@@ -44,6 +89,7 @@ def snapshot(rig):
     return {'bones':{b.name:{'basis':matrix_list(b.matrix_basis),'matrix':matrix_list(b.matrix),'mode':b.rotation_mode}
                      for b in rig.pose.bones},
             'rigBasis':matrix_list(rig.matrix_basis),'rigWorld':matrix_list(rig.matrix_world),
+            'rootChannels':root_channels(rig),
             'slot':animation.action_slot.identifier if animation and animation.action_slot else None,
             'nla':[(t.name,t.mute) for t in animation.nla_tracks] if animation else [],
             'drivers':[(c.data_path,c.array_index,c.mute) for c in animation.drivers] if animation else [],
@@ -68,8 +114,13 @@ def suspend(context, rig):
     for bone in rig.pose.bones:
         for constraint in bone.constraints: constraint.mute = True
     for constraint in rig.constraints: constraint.mute = True
-    rig.matrix_world = matrix(state['rigWorld'])
+    # Muting a root constraint/driver/Action can change its evaluated world
+    # transform. Hold that evaluated frame only when needed; an unchanged root
+    # must never undergo a gratuitous matrix -> Euler decomposition.
     context.view_layer.update()
+    if matrix_list(rig.matrix_world) != state['rigWorld']:
+        rig.matrix_world = matrix(state['rigWorld'])
+        context.view_layer.update()
     for bone in rig.pose.bones:
         bone.matrix = matrix(state['bones'][bone.name]['matrix'])
     context.view_layer.update()
@@ -105,12 +156,14 @@ def restore(context, rig):
     saved_slot=next((s for s in saved_action.slots if s.identifier==state['slot']),None) if saved_action and state['slot'] else None
     if saved_action and state['slot'] and saved_slot is None:
         raise ValueError('Suspended Action slot was removed; restore state retained')
+    if state.get('rootChannels') is not None:
+        validate_root_channels(rig,state['rootChannels'])
     for name, saved in state['bones'].items():
         bone = rig.pose.bones.get(name)
         if bone is None: raise ValueError('Suspended skeleton changed; state retained')
         bone.rotation_mode = saved['mode']
         bone.matrix_basis = matrix(saved['basis'])
-    rig.matrix_basis = matrix(state['rigBasis'])
+    restore_root(rig,state)
     if animation:
         animation.action = rig.get(ACTION)
         if animation.action and state['slot']:
