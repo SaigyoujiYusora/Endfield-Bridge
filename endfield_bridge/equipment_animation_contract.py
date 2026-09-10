@@ -1,15 +1,83 @@
 """Dedicated clip identity/rig validation, independent of Blender and game parsing."""
 import math
 import struct
+import hashlib
+from pathlib import Path
+
+PROOF_CONTRACT='native-equipment-clip-proof-v2'
 
 SELECTOR_KEYS=('slotId','resourceId','animatorId','controllerId')
 IDENTITY_KEYS=('ownerAssetId','characterId','declarationId','slotId','resourceId','resourcePath','animatorId','controllerId')
 
 
 def supported(capabilities):
+    if not isinstance(capabilities,dict):return False
     feature=capabilities.get('equipmentAnimation') or {}
-    return (feature.get('rig')=='native-equipment-source-path' and
-            {'animation-clips','animation-import'} <= set(capabilities.get('methods',())))
+    methods=capabilities.get('methods')
+    return (capabilities.get('product')=='Sora-Core' and isinstance(feature,dict) and
+            feature.get('proofContract')==PROOF_CONTRACT and
+            feature.get('rig')=='native-equipment-source-path' and
+            feature.get('sampling')=='non-ACL native frame grid' and
+            feature.get('transport')=='animation-clips / animation-import with equipment selector' and
+            feature.get('runtime')=='single clip only; no controller/events/visibility/damping' and
+            isinstance(methods,list) and all(isinstance(v,str) for v in methods) and
+            {'animation-clips','animation-import'} <= set(methods))
+
+
+def backend_fingerprint(executable):
+    """Bind the apphost and its managed/native dependencies, outside UI draw()."""
+    path=Path(executable).expanduser()
+    if not path.is_absolute() or not path.is_file():raise ValueError('Select an existing absolute Core executable')
+    path=path.resolve()
+    files={path,*path.parent.glob('*.dll')}
+    for name in ('Sora-Core.deps.json','Sora-Core.runtimeconfig.json','source-snapshot.json','distribution-files.json'):
+        candidate=path.parent/name
+        if candidate.is_file():files.add(candidate)
+    return {str(file.resolve()):hashlib.sha256(file.read_bytes()).hexdigest() for file in sorted(files)}
+
+
+def catalog_manifest(inspected):
+    source=inspected.get('catalogSource') if isinstance(inspected,dict) else None
+    manifest=source.get('manifestHash') if isinstance(source,dict) else None
+    if not isinstance(manifest,str) or not manifest:raise ValueError('Equipment clips require a current unified catalog manifest')
+    return manifest
+
+
+def source_clip(selected,expected):
+    identity=selected['cab']+':'+selected['pathId']
+    matches=[c for c in expected.get('controllerClips',[]) if c.get('sourceId')==identity]
+    if len(matches)!=1:raise ValueError('Clip is absent or ambiguous in the imported controller declaration')
+    source=matches[0]
+    for key,source_key in (('name','name'),('originalSourceId','originalSourceId'),('controllerChain','controllerChain')):
+        if selected.get(key)!=source.get(source_key):raise ValueError('Discovered clip '+key+' differs from imported source metadata')
+    paths=source.get('bindingPaths')
+    if not isinstance(paths,list) or any(type(v) is not int or not 0<=v<=0xffffffff for v in paths) or len(set(paths))!=len(paths):
+        raise ValueError('Imported controller binding-path authority is missing or ambiguous')
+    return source
+
+
+def discovery_schema(selected,expected):
+    if selected.get('proofContract')!=PROOF_CONTRACT:raise ValueError('Core discovery binding-proof contract is unsupported')
+    source=selected.get('bindingSchemaSource')
+    required={'resourcePath':expected['resourcePath'],'cab':selected['cab'],'pathId':selected['pathId'],'manifestHash':expected['manifestHash']}
+    if not isinstance(source,dict) or any(source.get(k)!=v for k,v in required.items()):
+        raise ValueError('Discovery binding schema source differs from selected native identity')
+    rows=selected.get('bindingSchema')
+    if not isinstance(rows,list) or len(rows)>16384:raise ValueError('Discovery binding schema is missing or excessive')
+    for row in rows:
+        if not isinstance(row,dict) or any(type(row.get(k)) is not int for k in ('pathHash','attribute','typeId','customType','isPPtrCurve')):
+            raise ValueError('Discovery binding schema fields are invalid')
+        if not 0<=row['pathHash']<=0xffffffff:raise ValueError('Discovery path hash is outside its wire range')
+        path=row.get('sourcePath');resolution=row.get('resolution')
+        if resolution=='native-path':
+            if not isinstance(path,str) or path not in expected.get('nodeSourcePaths',[]):
+                raise ValueError('Discovery binding path is absent from the imported native hierarchy')
+        elif resolution not in ('unmapped-path-hash','ambiguous-path-hash') or path is not None:
+            raise ValueError('Discovery unresolved binding proof is inconsistent')
+    declared=source_clip(selected,expected)
+    if {r['pathHash'] for r in rows}!=set(declared['bindingPaths']):
+        raise ValueError('Discovery schema does not cover the imported controller binding paths')
+    return rows
 
 
 def frame_grid(times,fps,origin):
@@ -48,11 +116,15 @@ def sources(assembly):
 
 def validate_identity(identity, expected):
     if not isinstance(identity,dict):raise ValueError('Equipment animation identity proof is missing')
-    for key in IDENTITY_KEYS:
-        if not expected.get(key) or identity.get(key)!=expected[key]:
-            raise ValueError('Equipment animation '+key+' differs from the selected owner/slot/controller')
-    if identity.get('rigKind')!='native-equipment-source-path' or not identity.get('manifestHash'):
-        raise ValueError('Equipment animation native rig/manifest proof is missing')
+    for key in (*IDENTITY_KEYS,'manifestHash'):
+        if not isinstance(expected.get(key),str) or not expected[key] or identity.get(key)!=expected[key]:
+            raise ValueError('Equipment animation '+key+' differs from the selected owner/catalog/controller')
+    if identity.get('rigKind')!='native-equipment-source-path':raise ValueError('Equipment native rig proof is missing')
+    path=identity.get('animatorSourcePath')
+    if not isinstance(path,str) or not path or path not in expected.get('nodeSourcePaths',[]):
+        raise ValueError('Equipment Animator source path is absent from the imported native hierarchy')
+    if expected.get('animatorSourcePath') is not None and path!=expected['animatorSourcePath']:
+        raise ValueError('Equipment Animator source path differs from the recorded native initial-pose authority')
 
 
 def validate_discovery(rows, expected):
@@ -64,6 +136,8 @@ def validate_discovery(rows, expected):
         validate_identity(row.get('equipment'),expected)
         if row.get('resourcePath')!=expected['resourcePath'] or not row.get('cab') or not row.get('pathId'):
             raise ValueError('Discovered equipment clip source identity differs')
+        source_clip(row,expected)
+        discovery_schema(row,expected)
         identity=(row['cab'],row['pathId'])
         if identity in seen:raise ValueError('Discovered equipment clip identity is duplicated')
         seen.add(identity)
@@ -74,6 +148,7 @@ def validate_discovery(rows, expected):
 
 
 def validate_import(result, expected, selected, live_bones, canonical=False):
+    validate_discovery([selected],expected)
     proof=result.get('equipment') or {}
     validate_identity(proof.get('identity'),expected)
     if proof['identity']!=selected['equipment']:
@@ -81,6 +156,9 @@ def validate_import(result, expected, selected, live_bones, canonical=False):
     for key, value in (('clipId',selected['cab']+':'+selected['pathId']),
                        ('originalSourceId',selected['originalSourceId']),('controllerChain',selected['controllerChain'])):
         if proof.get(key)!=value:raise ValueError('Equipment '+key+' changed since discovery')
+    if proof.get('proofContract')!=PROOF_CONTRACT:raise ValueError('Core import binding-proof contract is unsupported')
+    if proof.get('scope')!='single-native-generic-clip; no controller transitions, events, visibility or damping':
+        raise ValueError('Equipment clip sampling scope is unsupported')
     bones=result.get('bones')
     if not isinstance(bones,list) or not bones or len(bones)!=len(live_bones):
         raise ValueError('Equipment source bone count differs from the imported rig')
@@ -104,12 +182,20 @@ def validate_import(result, expected, selected, live_bones, canonical=False):
             raise ValueError('Equipment Rest matrix differs: '+path+'; reimport the matching source')
     times=proof.get('times')
     clip=result.get('clip') or {}
-    if not isinstance(times,list) or not times or len(times)!=proof.get('samples'):
+    if not isinstance(times,list) or not 2<=len(times)<=100001 or type(proof.get('samples')) is not int or len(times)!=proof['samples']:
         raise ValueError('Equipment authored sample grid is missing')
     if any(type(t) not in (float,int) or not math.isfinite(t) for t in times) or times[0]!=0 or any(b<=a for a,b in zip(times,times[1:])):
         raise ValueError('Equipment authored sample grid is invalid')
     if abs(times[-1]-float(clip.get('duration',-1)))>1e-7 or clip.get('fps')!=proof.get('sampleRate'):
         raise ValueError('Equipment clip interval/sample rate differs from its proof')
+    native_source=(clip.get('native') or {}).get('source')
+    required_source={'resourcePath':expected['resourcePath'],'cab':selected['cab'],'pathId':selected['pathId'],'manifestHash':expected['manifestHash']}
+    if not isinstance(native_source,dict) or any(native_source.get(k)!=v for k,v in required_source.items()):
+        raise ValueError('Equipment clip.native.source differs from selected native identity')
+    if clip.get('name')!=selected['name']:raise ValueError('Equipment clip name differs from selected source')
+    rate=proof.get('sampleRate')
+    if type(rate) not in (int,float) or not math.isfinite(rate) or not 1<=rate<=240 or any(abs(t-i/rate)>1e-9 for i,t in enumerate(times)):
+        raise ValueError('Equipment proof times differ from the authored frame grid')
     channels=set()
     for track in clip.get('tracks',[]):
         index,channel=track.get('bone'),track.get('channel')
@@ -127,10 +213,32 @@ def validate_import(result, expected, selected, live_bones, canonical=False):
                 raise ValueError('Equipment xyzw quaternion is not normalized')
     if channels!={(i,c) for i in by_index for c in ('location','rotation','scale')}:
         raise ValueError('Equipment clip does not cover every native bone channel')
-    for binding in proof.get('bindings',[]):
-        index=binding.get('bone')
+    schema={}
+    for row in discovery_schema(selected,expected):
+        pair=(row['pathHash'],row['attribute'])
+        if pair in schema:raise ValueError('Discovered binding path/attribute is duplicated')
+        if row['attribute'] not in (1,2,3) or row['typeId']!=4 or row['customType']!=0 or row['isPPtrCurve']!=0 or row['resolution']!='native-path':
+            raise ValueError('Selected discovery schema has unsupported or unresolved bindings')
+        schema[pair]=row
+    bindings=proof.get('bindings')
+    if not isinstance(bindings,list) or not bindings:raise ValueError('Equipment binding proof is missing')
+    pairs=set();animator_path=proof['identity']['animatorSourcePath']
+    for binding in bindings:
+        if not isinstance(binding,dict):raise ValueError('Equipment binding row is invalid')
+        index=binding.get('bone');attribute=binding.get('attribute');path_hash=binding.get('pathHash')
         if type(index) is not int or index not in by_index or binding.get('sourcePath')!=bones[index]['sourcePath']:
             raise ValueError('Equipment binding proof points outside the imported rig')
+        if type(attribute) is not int or attribute not in (1,2,3) or type(path_hash) is not int or not 0<=path_hash<=0xffffffff:
+            raise ValueError('Equipment binding attribute/path hash is invalid')
+        pair=(path_hash,attribute)
+        if pair in pairs:raise ValueError('Equipment binding path/attribute is duplicated')
+        if pair not in schema or schema[pair]['sourcePath']!=binding['sourcePath']:
+            raise ValueError('Equipment binding differs from the selected discovery schema')
+        path=binding['sourcePath']
+        if path!=animator_path and not path.startswith(animator_path+'/'):
+            raise ValueError('Equipment binding is outside its Animator hierarchy')
+        pairs.add(pair)
+    if pairs!=set(schema):raise ValueError('Equipment proof does not cover the complete discovered binding schema')
     return clip, bones, proof
 
 

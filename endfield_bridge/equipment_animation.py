@@ -50,12 +50,22 @@ class SORA_EquipmentAnimationSettings(bpy.types.PropertyGroup):
     selected_clip:IntProperty(default=-1)
     supported:BoolProperty(default=False)
     checked_executable:StringProperty()
+    checked_binary_signature:StringProperty()
     result_signature:StringProperty()
     status:StringProperty(default='选择专用装备与控制器，再读取片段')
 
 
 def executable(context):
     return bpy.path.abspath(context.preferences.addons[__package__].preferences.executable)
+
+
+def require_backend(context):
+    settings=context.scene.sora_equipment_animation
+    path=executable(context)
+    current=json.dumps(contract.backend_fingerprint(path),sort_keys=True)
+    if not settings.supported or settings.checked_executable!=path or settings.checked_binary_signature!=current:
+        raise ValueError('Core executable or dependencies changed; check equipment animation support again')
+    return current
 
 
 def timeline_state(context):
@@ -93,10 +103,19 @@ def selection(context):
     expected={'ownerAssetId':owner_rig['sora_asset'],'characterId':assembly['characterId'],
               'declarationId':assembly['declaration']['sourceId'],'slotId':source.slot_id,'resourceId':source.resource_id,
               'resourcePath':source.resource_path,**pair}
+    resource=next(r for r in assembly['resources'] if r['resourceId']==source.resource_id)
+    selected_controller=next(c for c in resource['controllers'] if all(c.get(k)==v for k,v in pair.items()))
+    initial=resource.get('defaultPose') or {}
+    initial_path=initial.get('animatorSourcePath') if all(initial.get(k)==v for k,v in pair.items()) else None
+    expected.update(controllerClips=selected_controller.get('clips',[]),
+                    nodeSourcePaths=sorted({obj.get('sora_source_path') for obj in child.objects
+                                            if obj.get('sora_node_id') and obj.get('sora_source_path')}),
+                    animatorSourcePath=initial_path)
     parameters={'root':root,'path':owner_rig['sora_database'],'asset':owner_rig['sora_asset'],'resource':source.resource_path,
                 'equipment':{key:expected[key] for key in contract.SELECTOR_KEYS}}
     signature=json.dumps({'parameters':parameters,'owner':owner.as_pointer(),'child':child.as_pointer(),
-                          'rig':rig.as_pointer(),'data':rig.data.as_pointer(),'executable':executable(context)},sort_keys=True)
+                          'rig':rig.as_pointer(),'data':rig.data.as_pointer(),'executable':executable(context),
+                          'binary':settings.checked_binary_signature,'sourceAuthority':expected},sort_keys=True)
     return owner,child,rig,expected,parameters,signature
 
 
@@ -115,11 +134,30 @@ def clone(value):
     return [clone(item) for item in value]
 
 
+def editable_rna(value):
+    """Capture authored constraint settings, excluding evaluated readonly errors."""
+    result={'__rnaType':value.bl_rna.identifier}
+    for prop in value.bl_rna.properties:
+        name=prop.identifier
+        if name=='rna_type' or name.startswith('bl_') or prop.is_readonly and prop.type not in {'COLLECTION','POINTER'}:continue
+        item=getattr(value,name)
+        if prop.type=='COLLECTION':result[name]=[editable_rna(row) for row in item]
+        elif prop.type=='POINTER':
+            result[name]=clone(item) if item is None or isinstance(item,bpy.types.ID) else editable_rna(item)
+        else:result[name]=clone(item)
+    return result
+
+
+def constraint_state(rig):
+    return {'object':[editable_rna(c) for c in rig.constraints],
+            'bones':{bone.name:[editable_rna(c) for c in bone.constraints] for bone in rig.pose.bones}}
+
+
 def capture(rig):
     from .action_binding import slot_identity
     from .pose_controls import root_channels
     animation=rig.animation_data
-    return {'root':root_channels(rig),'properties':clone(dict(rig.items())),
+    return {'root':root_channels(rig),'properties':clone(dict(rig.items())),'constraints':constraint_state(rig),
         'bones':{bone.name:{'mode':bone.rotation_mode,**{key:list(getattr(bone,key)) for key in
                     ('location','scale','rotation_euler','rotation_quaternion','rotation_axis_angle')}} for bone in rig.pose.bones},
         'hadAnimation':animation is not None,'action':animation.action if animation else None,
@@ -128,6 +166,7 @@ def capture(rig):
 
 
 def restore(rig,saved):
+    # Constraints are only observed; do not overwrite intervening user edits.
     from .action_binding import bind_action
     from .pose_controls import restore_root
     if saved['hadAnimation']:
@@ -186,9 +225,13 @@ class SORA_OT_equipment_animation_capabilities(TaskOperator,bpy.types.Operator):
     bl_label='检查装备动画支持'
     def execute(self,context):
         settings=context.scene.sora_equipment_animation;path=executable(context)
+        try:binary=json.dumps(contract.backend_fingerprint(path),sort_keys=True)
+        except Exception as error:self.report({'ERROR'},str(error));return {'CANCELLED'}
+        settings.supported=False;settings.checked_binary_signature='';invalidate_clips(settings)
         def complete(result):
             if executable(context)!=path:raise ValueError('后端已改变，请重新检查')
-            settings.supported=contract.supported(result);settings.checked_executable=path
+            if json.dumps(contract.backend_fingerprint(path),sort_keys=True)!=binary:raise ValueError('Core binary changed during capability check')
+            settings.supported=contract.supported(result);settings.checked_executable=path;settings.checked_binary_signature=binary
             settings.status='后端支持专用装备原生片段' if settings.supported else '当前后端不支持专用装备片段；请使用已审核的支持版本'
             context.scene.sora.status=settings.status
         try:return tasks.start(self,context,'capabilities',{},complete)
@@ -201,11 +244,13 @@ class SORA_OT_equipment_animation_clips(TaskOperator,bpy.types.Operator):
     def execute(self,context):
         try:
             settings=context.scene.sora_equipment_animation
-            if not settings.supported or settings.checked_executable!=executable(context):raise ValueError('请先检查当前后端的装备动画支持')
+            require_backend(context)
             _,_,rig,expected,parameters,signature=selection(context);paused(context,rig)
             def complete(result):
                 if selection(context)[-1]!=signature:raise ValueError('装备选择或来源已改变，请重新读取片段')
-                rows=contract.validate_discovery(result,expected)
+                require_backend(context)
+                current_expected=dict(expected,manifestHash=contract.catalog_manifest(result['catalog']))
+                rows=contract.validate_discovery(result['clips'],current_expected)
                 settings.clips.clear()
                 for value in rows:
                     row=settings.clips.add();row.name=value['name'];row.metadata_json=json.dumps(value)
@@ -213,7 +258,8 @@ class SORA_OT_equipment_animation_clips(TaskOperator,bpy.types.Operator):
                 settings.result_signature=signature
                 settings.status=str(len(rows))+' 个引用片段；加载时验证采样和绑定'
                 context.scene.sora.status=settings.status
-            return tasks.start(self,context,'animation-clips',parameters,complete)
+            return tasks.start_batch(self,context,[{'key':'catalog','method':'inspect','params':{'path':parameters['path']}},
+                {'key':'clips','method':'animation-clips','params':parameters}],complete)
         except Exception as error:self.report({'ERROR'},str(error));return {'CANCELLED'}
 
 
@@ -224,21 +270,23 @@ class SORA_OT_equipment_animation_import(TaskOperator,bpy.types.Operator):
     def execute(self,context):
         try:
             settings=context.scene.sora_equipment_animation
-            if not settings.supported or settings.checked_executable!=executable(context):raise ValueError('请先检查当前后端的装备动画支持')
+            require_backend(context)
             owner,child,rig,expected,parameters,signature=selection(context);paused(context,rig)
             if settings.result_signature!=signature or not 0<=settings.selected_clip<len(settings.clips):raise ValueError('请读取并选择当前控制器的片段')
             selected=json.loads(settings.clips[settings.selected_clip].metadata_json)
-            contract.validate_discovery([selected],expected)
+            contract.validate_discovery([selected],dict(expected,manifestHash=selected['equipment'].get('manifestHash')))
             parameters=dict(parameters,selection={'cab':selected['cab'],'pathId':selected['pathId']})
             initial=capture(rig);timing=timeline_state(context)
             def check():
+                require_backend(context)
                 paused(context,rig)
                 if selection(context)[-1]!=signature or timeline_state(context)!=timing:raise ValueError('装备目标或时间轴已改变；未覆盖新的用户状态')
                 if not 0<=settings.selected_clip<len(settings.clips) or json.loads(settings.clips[settings.selected_clip].metadata_json)!=selected:raise ValueError('片段选择已改变')
                 if capture(rig)!=initial:raise ValueError('装备姿势或 Action 已编辑；保留新状态')
             def complete(result):
                 check()
-                clip,bones,proof=contract.validate_import(result,expected,selected,live_bones(rig),bool(child.get('sora_render_canonical')))
+                current_expected=dict(expected,manifestHash=contract.catalog_manifest(result['catalog']))
+                clip,bones,proof=contract.validate_import(result['clip'],current_expected,selected,live_bones(rig),bool(child.get('sora_render_canonical')))
                 from .animation_actions import apply_clip_steps
                 mapping={'fps':timing[0]/timing[1],'origin':timing[4]+timing[5]}
                 frames=contract.frame_grid(proof['times'],mapping['fps'],mapping['origin'])
@@ -252,7 +300,8 @@ class SORA_OT_equipment_animation_import(TaskOperator,bpy.types.Operator):
                 settings.status=f"已加载 {clip['name']}：帧 {mapping['origin']:g}–{end:g}；源 {clip['fps']:g} Hz，时间轴 {mapping['fps']:g} fps"
                 if end>context.scene.frame_end:settings.status+='；片段超出场景结束帧，可按需调整'
                 context.scene.sora.status=settings.status
-            return tasks.start(self,context,'animation-import',parameters,complete)
+            return tasks.start_batch(self,context,[{'key':'catalog','method':'inspect','params':{'path':parameters['path']}},
+                {'key':'clip','method':'animation-import','params':parameters}],complete)
         except Exception as error:self.report({'ERROR'},str(error));return {'CANCELLED'}
 
 
