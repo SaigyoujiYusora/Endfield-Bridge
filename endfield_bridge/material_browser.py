@@ -14,8 +14,31 @@ def metadata(material):
     transparent = ('TRANSPARENT' if material.get('endf_npr_transparent_base') or
                    (surface is not None and surface >= 0.5) else
                    'OPAQUE' if surface is not None else 'UNKNOWN')
+    classification = descriptor.get('classification') or {}
     return dict(part=str(material.get('ruri_uber_part') or descriptor.get('part') or ''),
-                shader=shader, reference=reference, transparency=transparent)
+                shader=shader, reference=reference, transparency=transparent,
+                classification=dict(category=str(classification.get('category') or ''),
+                                    rule=str(classification.get('rule') or ''),
+                                    source=str(classification.get('source') or ''),
+                                    confidence=str(classification.get('confidence') or '')))
+
+
+# Native shader-identity classes to user-facing labels. This is provenance, not the
+# preview material mode (ENDF NPR-Shader / Basic PBR) and not import support.
+CLASS_LABELS = {'Standard': '标准', 'Face': '面部', 'Eyes': '眼睛', 'Hair': '头发',
+                'Fur': '毛发', 'Eyebrow': '眉毛', 'VFX': '特效',
+                'OverlayShadow': '叠加阴影', 'LiquidAg': '液态银'}
+
+
+def classification_text(info):
+    """Auditable native classification, or 未分类 when the shader is unresolved/unmapped."""
+    classification = info['classification']
+    category = classification['category']
+    if not category or category == 'unclassified':
+        return '未分类'
+    detail = ' · '.join(value for value in (classification['rule'], classification['source'],
+                                            classification['confidence']) if value)
+    return CLASS_LABELS.get(category, category) + ('（' + detail + '）' if detail else '')
 
 
 def owners(root):
@@ -83,7 +106,9 @@ class SORA_MaterialBrowser(bpy.types.PropertyGroup):
 
 class SORA_UL_materials(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index=0, flt_flag=0):
-        layout.label(text=f'{item.role} · {item.material.name if item.material else "已移除"}', icon='MATERIAL')
+        split = layout.split(factor=0.62)
+        split.label(text=f'{item.role} · {item.material.name if item.material else "已移除"}', icon='MATERIAL')
+        split.label(text=classification_text(metadata(item.material)) if item.material else '未分类')
 
 
 class SORA_OT_material_refresh(bpy.types.Operator):
@@ -158,6 +183,7 @@ def draw(layout, context):
         box.label(text='部位: '+(info['part'] or '未记录'))
         box.label(text='Shader: '+(info['shader'] or '未记录'))
         box.label(text='透明属性: '+{'TRANSPARENT':'透明标志','OPAQUE':'不透明标志','UNKNOWN':'未记录'}[info['transparency']])
+        box.label(text='分类: '+classification_text(info))
         if info['reference']:
             box.label(text='原生引用: '+info['reference'])
         box.operator('sora.locate_material_slot', icon='RESTRICT_SELECT_OFF')

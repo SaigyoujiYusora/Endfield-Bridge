@@ -170,6 +170,9 @@ def _build_basic_material(records, images, token, mode):
     material = bpy.data.materials.new(records[0]["name"])
     try:
         material["sora_instance"] = token
+        native = records[0].get("npr")
+        if native:
+            material["sora_material_descriptor"] = json.dumps(native)
         if mode == "NPR":
             material["sora_npr_diagnostics"] = "Basic PBR fallback: unknown, unsupported part, or descriptor version"
         material.diffuse_color = records[0]["baseColor"]
