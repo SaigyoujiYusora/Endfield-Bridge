@@ -97,6 +97,23 @@ def cancel():
         _active._task.cancel()
 
 
+def _owns_active(operator):
+    """True when the stored active operator belongs to this modal wrapper's run.
+
+    Blender re-creates the Python wrapper for every modal callback while the
+    operator instance and its attribute dictionary persist across those
+    wrappers, so the stored reference is not the same Python object as the one
+    that finishes. The per-run task object is shared by both wrappers and is
+    unique to this run, so it is the stable identity to compare.
+    """
+    if _active is operator:
+        return True
+    try:
+        return _active is not None and _active._task is operator._task
+    except (AttributeError, ReferenceError):
+        return False
+
+
 def _redraw_task_views(context):
     try:
         windows = tuple(context.window_manager.windows)
@@ -161,7 +178,7 @@ def _finish(operator, context, error=None):
         except (AttributeError, ReferenceError) as cleanup_error:
             errors.append('task scene unavailable: ' + str(cleanup_error))
     finally:
-        if _active is operator:
+        if _owns_active(operator):
             _active = None
         _redraw_task_views(context)
     if errors:
