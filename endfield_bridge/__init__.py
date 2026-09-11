@@ -126,7 +126,7 @@ class SORA_Settings(bpy.types.PropertyGroup):
     database_format_version: IntProperty(default=0, min=0)
     budget_database: StringProperty()
     source_details: BoolProperty(name="Data source settings", default=True)
-    category: EnumProperty(name="Library", items=[('PEOPLE','人物',''),('ITEMS','物品',''),('SCENES','场景','')], update=library_ui.switch_page)
+    category: EnumProperty(name="Library", items=[('PEOPLE','人物',''),('ITEMS','物品',''),('SCENES','场景',''),('EQUIPMENT','专用装备','')], update=library_ui.switch_page)
     kind: EnumProperty(name="Type", items=[('character','角色',''),('npc','NPC','')], update=library_ui.switch_page)
     library_pages: StringProperty(default='{}', options={'SKIP_SAVE'})
     library_page: StringProperty(default='character', options={'SKIP_SAVE'})
@@ -574,7 +574,8 @@ class SORA_PT_panel(bpy.types.Panel):
             box.label(text='区域 / 过场：占位，尚未支持', icon='INFO')
         else:
             if settings.category == 'PEOPLE': box.row(align=True).prop(settings, 'kind', expand=True)
-            else: box.label(text='通用武器（按后端支持范围）')
+            elif settings.category == 'ITEMS': box.label(text='通用武器（按后端支持范围）')
+            else: box.label(text='角色专用装备（原生角色声明）')
             box.prop(settings, 'query')
             box.operator('sora.search')
             box.template_list('SORA_UL_assets', 'sora_assets', settings, 'assets', settings, 'selected', rows=4)

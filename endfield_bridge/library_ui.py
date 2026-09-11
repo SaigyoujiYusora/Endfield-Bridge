@@ -12,10 +12,12 @@ def search_kind(settings):
         return settings.kind
     if settings.category == 'ITEMS':
         return 'weapon'
+    if settings.category == 'EQUIPMENT':
+        return 'equipment'
     return None
 
 
-CLASSIFICATIONS = {'character': '角色', 'npc': 'NPC', 'weapon': '通用武器'}
+CLASSIFICATIONS = {'character': '角色', 'npc': 'NPC', 'weapon': '通用武器', 'equipment': '专用装备'}
 
 
 def classification_text(kind):
