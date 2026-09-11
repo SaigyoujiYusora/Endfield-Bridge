@@ -184,7 +184,10 @@ def create_dedicated_steps(context,collection,rig,assembly,material_mode=None,st
         apply_state(context,collection,state)
         collection['sora_equipment_can_idle']=bool(assembly['canBindStates'].get('idle'))
         collection['sora_equipment_can_fight']=bool(assembly['canBindStates'].get('fight'))
-        collection['sora_equipment_status']='Static '+state+' ready; animation events and helper damping are not evaluated'
+        collection['sora_equipment_status']='Static '+state+' ready; helper damping is not evaluated'
+        from . import equipment_events
+        collection[equipment_events.ENABLED]=True
+        collection[equipment_events.STATUS]='身体事件跟随已开启；等待当前角色的原生身体动作'
     except BaseException:
         for child in reversed(created):remove_scene(context,child,force_cleanup=True)
         if prior is None:
@@ -205,7 +208,8 @@ class SORA_OT_equipment_load(TaskOperator,bpy.types.Operator):
             yield from create_dedicated_steps(context,collection,rig,assembly,collection.get('sora_render_mode'))
             context.scene.sora.status=collection['sora_equipment_status']
         try:return tasks.start(self,context,'equipment-assembly',{'root':bpy.path.abspath(context.scene.sora.game_root),
-            'path':rig['sora_database'],'asset':rig['sora_asset']},complete)
+            'path':rig['sora_database'],'asset':rig['sora_asset']},complete,
+            prepare=tasks.native_texture_prepare(collection.get('sora_render_mode')))
         except Exception as error:self.report({'ERROR'},str(error));return {'CANCELLED'}
 
 
@@ -218,6 +222,8 @@ class SORA_OT_equipment_state(bpy.types.Operator):
         try:
             collection=owner_collection(context)
             if collection is None or CONTRACT not in collection:raise ValueError('Load dedicated equipment first')
+            from . import equipment_events
+            equipment_events.pause(collection)
             apply_state(context,collection,self.state)
             return {'FINISHED'}
         except Exception as error:self.report({'ERROR'},str(error));return {'CANCELLED'}
@@ -236,7 +242,9 @@ def draw(layout,context):
         if not collection.get('sora_equipment_can_idle') or not collection.get('sora_equipment_can_fight'):
             layout.label(text='Disabled state: native attachment gaps')
         layout.label(text='Dedicated slots: '+str(len(owned_children(collection,'dedicated'))))
-        layout.label(text='Events / helper damping: not evaluated')
+        from . import equipment_events
+        equipment_events.draw(layout,context,collection)
+        layout.label(text='Helper damping: not evaluated')
     else:layout.label(text=collection.get('sora_equipment_status','Dedicated equipment not associated'))
     from . import generic_weapons
     generic_weapons.draw(layout,context)
@@ -246,5 +254,9 @@ def draw(layout,context):
 CLASSES=(SORA_OT_equipment_load,SORA_OT_equipment_state)
 def register():
     for cls in CLASSES:bpy.utils.register_class(cls)
+    from . import equipment_events
+    equipment_events.register()
 def unregister():
+    from . import equipment_events
+    equipment_events.unregister()
     for cls in reversed(CLASSES):bpy.utils.unregister_class(cls)

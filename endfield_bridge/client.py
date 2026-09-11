@@ -34,7 +34,7 @@ def request(executable, method, **parameters):
 
 class CoreTask:
     """One cancellable NDJSON request. Worker threads never access Blender."""
-    def __init__(self, executable, method, **parameters):
+    def __init__(self, executable, method, prepare=None, **parameters):
         import queue
         import threading
         import uuid
@@ -45,6 +45,8 @@ class CoreTask:
         self.identity = uuid.uuid4().hex
         self.temporary_cleanup = None
         self.terminal = None
+        self.prepare = prepare
+        self.cancelled = False
         self.process = subprocess.Popen([str(path), 'rpc-task'], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='strict',
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -60,6 +62,9 @@ class CoreTask:
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
+        def emit(stage, completed, total, detail=None):
+            self.events.put({'protocol': 1, 'id': self.identity, 'event': 'progress',
+                             'stage': stage, 'completed': completed, 'total': total, 'detail': detail})
         final = False
         try:
             for line in self.process.stdout:
@@ -71,6 +76,12 @@ class CoreTask:
                 if event.get('event') == 'progress':
                     self.events.put(event)
                 elif 'ok' in event:
+                    if event.get('ok') is True and self.prepare is not None and not self.cancelled:
+                        self.prepare(event.get('result'), emit, lambda: self.cancelled)
+                    # The real backend terminal is always delivered. A local
+                    # cancel only stops the preparer at its next safe boundary;
+                    # the task modal decides, and keeps a committed database
+                    # replacement as success instead of losing that outcome.
                     final = True
                     self.terminal = event
                     self.events.put(event)
@@ -89,6 +100,7 @@ class CoreTask:
                     pass
 
     def cancel(self):
+        self.cancelled = True
         try:
             self.process.stdin.write(json.dumps({'method': 'cancel', 'targetId': self.identity}) + '\n')
             self.process.stdin.flush()
@@ -186,8 +198,10 @@ class SessionTask:
             self.process.terminate()
 
 
-def request_task(executable, method, **parameters):
+def request_task(executable, method, prepare=None, **parameters):
     task_type = SessionTask if method in {'search', 'inspect', 'animation-search-page'} else CoreTask
+    if task_type is CoreTask:
+        return CoreTask(executable, method, prepare=prepare, **parameters)
     return task_type(executable, method, **parameters)
 
 

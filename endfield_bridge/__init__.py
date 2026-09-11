@@ -388,7 +388,8 @@ class SORA_OT_import(TaskOperator, bpy.types.Operator):
             parameters = {'path': database, 'asset': identity,
                 'root': bpy.path.abspath(settings.game_root) if settings.game_root else ''}
             if formal_character: parameters['includeOwner'] = True
-            return tasks.start(self, context, 'equipment-assembly' if formal_character else 'scene', parameters, complete)
+            return tasks.start(self, context, 'equipment-assembly' if formal_character else 'scene', parameters, complete,
+                prepare=tasks.native_texture_prepare(mode))
         except (CoreError, ValueError) as error:
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
@@ -619,8 +620,9 @@ class SORA_PT_panel(bpy.types.Panel):
             from . import pose_controls
             pose_controls.draw(box, context)
         elif settings.function_page == 'MATERIAL':
-            from . import render_modes
+            from . import render_modes, material_browser
             render_modes.draw(box, context)
+            material_browser.draw(box, context)
             box.prop(settings, 'npr_post_processing')
             box.label(text='Post-processing affects the entire scene', icon='INFO')
         else:
@@ -656,12 +658,13 @@ def _migrate_sources_timer():
 
 
 def register():
-    from . import post, ruri_adapter, material_panel, face_controls, animation_panel, pose_controls, equipment, generic_weapons, equipment_animation
+    from . import post, ruri_adapter, material_panel, material_browser, face_controls, animation_panel, pose_controls, equipment, generic_weapons, equipment_animation
     from .registration import RegistrationTransaction
     transaction = RegistrationTransaction(bpy, __package__, (
         (bpy.types.Scene, 'sora'), (bpy.types.Scene, 'sora_animation'), (bpy.types.Scene, 'sora_weapons'),
         (bpy.types.Scene, 'sora_equipment_animation'),
         (bpy.types.Object, 'sora_face_browser'),
+        (bpy.types.Collection, 'sora_material_browser'),
         (bpy.types.WindowManager, 'endf_npr_search')))
     try:
         ruri_adapter.register()
@@ -670,6 +673,7 @@ def register():
         bpy.types.Scene.sora = bpy.props.PointerProperty(type=SORA_Settings)
         post.register()
         material_panel.register()
+        material_browser.register()
         face_controls.register()
         animation_panel.register()
         pose_controls.register()
@@ -703,7 +707,8 @@ def unregister():
     animation_panel.unregister()
     from . import face_controls
     face_controls.unregister()
-    from . import post, ruri_adapter, material_panel
+    from . import post, ruri_adapter, material_panel, material_browser
+    material_browser.unregister()
     material_panel.unregister()
     post.unregister()
     ruri_adapter.unregister()

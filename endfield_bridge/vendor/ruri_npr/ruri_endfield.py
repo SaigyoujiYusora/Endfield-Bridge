@@ -1196,7 +1196,7 @@ class Stack:
             self._flush_queued[0] = True
             bpy.app.timers.register(self._param_flush, first_interval=0.1)
 
-    def _param_write(self, mat):
+    def _param_write(self, mat, record=None):
         part = mat.get('ruri_uber_part', '')
         mirror = self._mat_mirror()
         col = mat.get('ruri_param_col')
@@ -1525,14 +1525,23 @@ class Stack:
         g._set(cmix.inputs[2], ctr.outputs[0])
         return cmix.outputs[0]
 
-    def build_material(self, mat, part=None, opaque=True, multiply_blend=False, cull=2.0, images=None):
+    def build_material_steps(self, mat, part=None, opaque=True, multiply_blend=False, cull=2.0, images=None):
+        """Local ENDF2Blend modification: same graph as build_material(), as a generator.
+
+        Only progress yields are added; node order, links, parameters and the
+        returned instance list are unchanged. build_material() drains this
+        generator so every existing synchronous caller keeps its behaviour.
+        """
         part = part or self.DEFAULT_PART
         spec = self.part(part)
         nt = mat.node_tree
         nt.nodes.clear()
         g = G(nt, is_group=False)
+        yield {'stage': 'Building NPR shader nodes', 'completed': 0, 'total': len(spec['segments'])}
         insts = []
-        for name in spec['segments']:
+        for segment_index, name in enumerate(spec['segments']):
+            yield {'stage': 'Building NPR shader nodes', 'completed': segment_index,
+                   'total': len(spec['segments']), 'detail': name}
             grp = g._nd('ShaderNodeGroup')
             grp.node_tree = self.group(name)
             grp.width = 320
@@ -1569,10 +1578,12 @@ class Stack:
             'input_color_w': col.outputs['Alpha'],
             'facing': 1.0,
         }
+        yield {'stage': 'Wiring NPR base inputs', 'completed': 0, 'total': len(insts)}
         for grp in insts:
             for s in grp.inputs:
                 if s.name in wires:
                     g._set(s, wires[s.name])
+        yield {'stage': 'Wiring NPR crossings'}
         self._wire_crossings(g, insts, spec['crossings'])
         all_insts = list(insts)
         # 建图序事后从节点表恢复不出来:实例序与 part 名建的时候就烙上(重接按 depth 取实例)。
@@ -1584,22 +1595,30 @@ class Stack:
         # 不烙则重接面(换灯/换世界)认不出自己刚建的模板。
         mat['ruri_uber_stack'] = self.PANEL_KEY
         anchor = None
-        for f in spec['fetches']:
+        for fetch_index, f in enumerate(spec['fetches']):
+            yield {'stage': 'Wiring NPR fetches', 'completed': fetch_index,
+                   'total': len(spec['fetches']), 'detail': f['slot']}
             image = images.get(f['slot']) if images else None
             nd = self._wire_fetch(g, part, insts, f, image)
             if nd is not None and nd.image is not None:
                 if anchor is None or (f['slot'] in self.ANCHOR_SLOTS and (anchor.label not in self.ANCHOR_SLOTS)):
                     anchor = nd
-        for c in spec['capabilities']:
+        for capability_index, c in enumerate(spec['capabilities']):
+            yield {'stage': 'Wiring NPR capabilities', 'completed': capability_index,
+                   'total': len(spec['capabilities'])}
             self._wire_capability(g, insts, c, {'material': mat})
-        for z in spec['zones']:
+        for zone_index, z in enumerate(spec['zones']):
+            yield {'stage': 'Wiring NPR zones', 'completed': zone_index, 'total': len(spec['zones'])}
             self._wire_zone(g, insts, z, images, all_insts, part, {'material': mat})
+        yield {'stage': 'Wiring NPR engine globals'}
         self._wire_engine_globals(g, all_insts, {'material': mat})
         # 材质 uniform 最后接:varying/fetch/能力答案已占线,余下未链接 socket 恰是参数行。
+        yield {'stage': 'Wiring NPR parameters'}
         self._wire_params(g, all_insts, part)
         if anchor is not None:
             nt.nodes.active = anchor
             anchor.select = True
+        yield {'stage': 'Finalizing NPR material'}
         finals = spec['finals']
 
         def final_sock(name):
@@ -1640,6 +1659,16 @@ class Stack:
         g._set(outp.inputs[0], self._apply_cull(g, mixsh.outputs[0], cull, olattr.outputs['Fac']))
         return all_insts
 
+    def build_material(self, mat, part=None, opaque=True, multiply_blend=False, cull=2.0, images=None):
+        """Synchronous driver for build_material_steps(); behaviour is unchanged."""
+        work = self.build_material_steps(mat, part=part, opaque=opaque, multiply_blend=multiply_blend,
+                                         cull=cull, images=images)
+        while True:
+            try:
+                next(work)
+            except StopIteration as finished:
+                return finished.value
+
     # ==================== 模板材质 + 实例化(唯一的逐材质路径) ====================
 
     TEMPLATE_KEY = 'ruri_uber_template'
@@ -1665,21 +1694,37 @@ class Stack:
                 fetch['neutral'], fetch['neutral_alpha'], fetch['non_color'])
         return out
 
-    def _template(self, part, opaque, multiply_blend, cull):
+    def _template_steps(self, part, opaque, multiply_blend, cull, ownership=None):
         name = '{0}{1} {2}{3} c{4:g}'.format(self.TEMPLATE_MAT, part,
                                              int(bool(opaque)), int(bool(multiply_blend)), float(cull))
         tpl = bpy.data.materials.get(name)
         assembly_stamp = self.STAMP + ':transparent-basemap-v2'
         if tpl is not None and tpl.get(self.STAMP_KEY) == assembly_stamp and tpl.node_tree is not None:
             return tpl
+        yield {'stage': 'Building NPR template', 'detail': name}
         stale = tpl
         if stale is not None:
+            old_name = stale.name
             stale.name = name + '.old'
+            if ownership is not None:
+                ownership.renamed(stale, old_name, stale.name)
         tpl = bpy.data.materials.new(name)
+        if ownership is not None:
+            ownership.material(tpl)
         if tpl.node_tree is None:
             tpl.use_nodes = True
-        self.build_material(tpl, part=part, opaque=opaque, multiply_blend=multiply_blend,
-                            cull=cull, images=self._template_images(part))
+        try:
+            yield from self.build_material_steps(tpl, part=part, opaque=opaque, multiply_blend=multiply_blend,
+                                                 cull=cull, images=self._template_images(part))
+        except BaseException:
+            # Local ENDF2Blend modification: a cancelled or failed template build
+            # must not leave an unstamped half-built material behind, which a
+            # later cache lookup would treat as a finished template.
+            if tpl.users == 0 and tpl.library is None:
+                bpy.data.materials.remove(tpl)
+            if stale is not None and stale.name != name:
+                stale.name = name
+            raise
         tpl[self.STAMP_KEY] = assembly_stamp
         tpl[self.TEMPLATE_KEY] = 1
         tpl.use_fake_user = True
@@ -1688,6 +1733,14 @@ class Stack:
             bpy.data.materials.remove(stale)
             tpl.name = name
         return tpl
+
+    def _template(self, part, opaque, multiply_blend, cull):
+        work = self._template_steps(part, opaque, multiply_blend, cull)
+        while True:
+            try:
+                next(work)
+            except StopIteration as finished:
+                return finished.value
 
     @staticmethod
     def _render_method(opaque, multiply_blend):
@@ -1702,10 +1755,12 @@ class Stack:
         (如 CharacterNPR 的半透明裙摆)就是连续 alpha 配抖动解法 = 噪点透明。"""
         return 'DITHERED' if (opaque and not multiply_blend) else 'BLENDED'
 
-    def instantiate(self, name, part, images=None, opaque=True, multiply_blend=False, cull=2.0):
+    def instantiate_steps(self, name, part, images=None, opaque=True, multiply_blend=False, cull=2.0, ownership=None):
         """一张材质 = 模板拷贝 + 贴图指针 + 一列像素。零建图、零逐 socket 灌参。"""
-        tpl = self._template(part, opaque, multiply_blend, cull)
+        tpl = yield from self._template_steps(part, opaque, multiply_blend, cull, ownership)
         mat = tpl.copy()
+        if ownership is not None:
+            ownership.material(mat)
         mat.name = name
         mat.use_fake_user = False
         # 模板可能是旧 .blend 里缓存下来的(stamp 只哈希着色语义,装配器改动不换 stamp),
@@ -1742,6 +1797,16 @@ class Stack:
         return mat, swapped
 
     # ==================== provider ====================
+
+    def instantiate(self, name, part, images=None, opaque=True, multiply_blend=False, cull=2.0):
+        """Synchronous driver for instantiate_steps(); behaviour is unchanged."""
+        work = self.instantiate_steps(name, part, images=images, opaque=opaque,
+                                      multiply_blend=multiply_blend, cull=cull)
+        while True:
+            try:
+                next(work)
+            except StopIteration as finished:
+                return finished.value
 
     def _cull_mode(self, props):
         if not self.CULL_PROPERTY:
@@ -1836,7 +1901,7 @@ class Stack:
         nt.links.new(mix.outputs[0], output.inputs['Surface'])
         mat.surface_render_method = 'BLENDED'
 
-    def provider(self, builder, props):
+    def provider_steps(self, builder, props, ownership=None):
         # 模板取法跟随本次导入的选项;缺选项 = 默认 append,不猜不回退。
         opts = getattr(builder, 'options', None) or {}
         self.link_templates = bool(opts.get(LINK_TEMPLATES_OPTION, False))
@@ -1849,13 +1914,20 @@ class Stack:
         images = self._load_images(builder, props)
         # _SurfaceType==1 才吃 alpha(gBuffer0.w 是 materialFlags 不是不透明度,接错皮肤隐形)。
         opaque = props.floats.get('_SurfaceType', 0.0) < 0.5 and not meta['transparent']
-        mat, swapped = self.instantiate(name, part_name, images=images, opaque=opaque,
-                                        multiply_blend=bool(meta.get('multiply')),
-                                        cull=self._cull_mode(props))
+        yield {'stage': 'Instantiating NPR material', 'detail': name}
+        mat, swapped = yield from self.instantiate_steps(name, part_name, images=images, opaque=opaque,
+                                                         multiply_blend=bool(meta.get('multiply')),
+                                                         cull=self._cull_mode(props), ownership=ownership)
         # 同名旧材质只改名让位,不删:宿主缓存攥着数据块,删了 = 悬垂指针 ReferenceError。
         stale = bpy.data.materials.get(name)
         if stale is not None and stale is not mat:
+            # Local ENDF2Blend modification: record this attempt's own rename in
+            # the per-build ownership record so a later cancel can restore it
+            # precisely, without a global delta over the yielding provider call.
+            old_name = stale.name
             stale.name = name + '.old'
+            if ownership is not None:
+                ownership.renamed(stale, old_name, stale.name)
             mat.name = name
         bst = props.texture_st.get(self.ST_SLOT) or [1.0, 1.0, 0.0, 0.0]
         if not opaque and not meta.get('multiply') and images.get(self.ST_SLOT) is not None:
@@ -1879,7 +1951,17 @@ class Stack:
         ref = props.shader_ref
         mat['ruri_uber_shader_guid'] = str(ref.get('guid', '')) if isinstance(ref, dict) else ''
         mat['ruri_uber_shader'] = self._shader_name(builder, props) or ''
-        col = self._param_write(mat)
+        # Local ENDF2Blend modification: hand the resolved source context to
+        # _param_write only for this synchronous fragment. It must not stay set
+        # across a yield, or another callback's _param_write could stamp it onto
+        # an unrelated material.
+        self._pending_shader_ref = dict(props.shader_ref or {})
+        self._pending_shader_id = dict(getattr(props, 'shader_id', None) or {})
+        try:
+            col = self._param_write(mat, ownership)
+        finally:
+            self._pending_shader_ref = None
+            self._pending_shader_id = None
         for node in mat.node_tree.nodes:
             if node.label == 'RuriMatCol':
                 node.outputs[0].default_value = float(col)
@@ -1887,6 +1969,15 @@ class Stack:
         print('[ruri-uber] {0}: shader={1} part={2} images={3} col={4}'.format(
             name, mat['ruri_uber_shader'], part_name, swapped, col), flush=True)
         return mat
+
+    def provider(self, builder, props):
+        """Synchronous driver for provider_steps(); behaviour is unchanged."""
+        work = self.provider_steps(builder, props)
+        while True:
+            try:
+                next(work)
+            except StopIteration as finished:
+                return finished.value
 
     def rewire_capabilities(self, mat):
         """重接兑现面(换灯/换世界后):只回收 ruri_cap 标记的节点,图本体与参数一概不碰。"""

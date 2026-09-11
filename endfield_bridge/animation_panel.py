@@ -183,22 +183,17 @@ class SORA_OT_animation_import(TaskOperator, bpy.types.Operator):
             parameters = dict( root=bpy.path.abspath(context.scene.sora.game_root),
                           path=rig['sora_database'], asset=rig['sora_asset'], resource=row.resource_path,
                           selection={'cab': selected.cab, 'pathId': selected.path_id})
+            from . import equipment_animation_load
+            jobs, owner, equipment_targets = equipment_animation_load.requests(context, rig, parameters)
             def complete(result):
                 if target(context)!=rig:raise ValueError('Animation target changed before binding')
-                clip, bones = result['clip'], result['bones']
-                metadata = {key:value for key,value in result.items() if key not in {'clip','bones'}}
-                if metadata:
-                    clip = dict(clip)
-                    native = dict(clip.get('native') or {})
-                    for key,value in metadata.items():
-                        if key in native and native[key] != value:
-                            raise CoreError('Conflicting native animation metadata: ' + key)
-                        native[key] = value
-                    clip['native'] = native
-                action = yield from apply_clip_steps(context, rig, clip, [bone['name'] for bone in bones],
-                                    bone_sources=bones, keep_face_controls=settings.keep_face_controls)
-                set_status(context, settings, 'Loaded ' + clip['name'] + ('; manual Face controls override retained face keys' if action.get('sora_face_mode') == 'MANUAL' else ''))
-            return tasks.start(self, context, 'animation-import', parameters, complete)
+                action = yield from equipment_animation_load.apply_steps(context, rig, owner, equipment_targets,
+                    result, settings.keep_face_controls)
+                message = 'Loaded ' + result['body']['clip']['name']
+                if equipment_targets: message += f'; {len(equipment_targets)} native equipment timelines loaded'
+                if action.get('sora_face_mode') == 'MANUAL': message += '; manual Face controls override retained face keys'
+                set_status(context, settings, message)
+            return tasks.start_batch(self, context, jobs, complete, stage='Loading body and native equipment timelines')
         except (CoreError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as error:
             set_status(context, settings, str(error))
             self.report({'ERROR'}, str(error))

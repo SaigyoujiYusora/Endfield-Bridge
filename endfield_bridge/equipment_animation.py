@@ -344,7 +344,7 @@ def draw(layout,context):
     playback.operator('screen.animation_play',text='播放 / 暂停',icon='PLAY')
     if current_rig and any(child.hide_viewport for child in eq.owned_children(settings.owner,'dedicated') if current_rig.name in child.objects):
         wrapped_label(box,'当前专用装备隐藏；可用上方静态状态按钮查看，不会自动改变显隐。',context)
-    wrapped_label(box,'按当前时间轴手动播放片段；不自动执行控制器切换或显隐事件。',context)
+    wrapped_label(box,'此处加载单个片段；身体事件跟随和模型显隐由上方独立控制。',context)
 
 
 CLASSES=(SORA_EquipmentAnimationSource,SORA_EquipmentAnimationController,SORA_EquipmentAnimationClip,

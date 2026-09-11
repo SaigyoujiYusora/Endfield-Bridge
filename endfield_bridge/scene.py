@@ -4,7 +4,7 @@ import uuid
 
 import bpy
 from mathutils import Matrix, Vector
-from .materials import build_material, load_images
+from .materials import build_material, build_material_steps, load_images
 
 
 def create_scene(context, document, material_mode=None):
@@ -54,13 +54,17 @@ def create_scene_steps(context, document, material_mode=None):
             yield {"stage": "Loading textures", "completed": index, "total": len(textures)}
             image_map.update(load_images([texture], token, images, document.get("textureDescriptors"), material_mode in {"RURI", "NPR"}))
         yield {"stage": "Creating skeleton"}
-        def material_for(indices):
+        def material_for_steps(indices, detail):
             key = tuple(indices)
-            if key not in material_cache:
-                material = build_material([document["materials"][index] for index in indices], image_map, token, material_mode)
-                materials.append(material)
-                material_cache[key] = material
-            return material_cache[key]
+            if key in material_cache:
+                return material_cache[key]
+            yield {"stage": "Building materials", "completed": mesh_index, "total": len(mesh_sources),
+                   "detail": detail}
+            material = yield from build_material_steps([document["materials"][index] for index in indices],
+                                                       image_map, token, material_mode)
+            materials.append(material)
+            material_cache[key] = material
+            return material
         if document["bones"]:
             armature = bpy.data.armatures.new(document["name"])
             owned_data.append(armature)
@@ -165,11 +169,13 @@ def create_scene_steps(context, document, material_mode=None):
                 count = source.get("submeshCount", 1)
                 for slot in range(len(slots) if material_mode in {"RURI", "NPR"} else count):
                     indices = [slots[slot]] if material_mode in {"RURI", "NPR"} else (slots[slot:] if slot == count - 1 else [slots[slot]])
-                    mesh.materials.append(material_for(indices))
+                    mesh.materials.append((yield from material_for_steps(
+                        indices, document["materials"][indices[0]]["name"])))
                 for polygon, slot in zip(mesh.polygons, source["triangleSlots"]):
                     polygon.material_index = slot
             elif source["material"] >= 0:
-                mesh.materials.append(material_for([source["material"]]))
+                mesh.materials.append((yield from material_for_steps(
+                    [source["material"]], document["materials"][source["material"]]["name"])))
             if rig is not None and source["weights"]:
                 groups = [obj.vertex_groups.new(name=bone["name"]) for bone in document["bones"]]
                 for weight_index, weight in enumerate(source["weights"]):

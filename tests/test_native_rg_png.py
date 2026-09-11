@@ -55,6 +55,28 @@ class NativeRgPngTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'dimensions'):
             materials._native_rg_png(png(16384, 16384, b''))
 
+    def test_preparation_stops_at_a_cancellation_boundary(self):
+        payload = png(1, 1, bytes([0, 128, 127, 255, 91]))
+        record = dict(name='normal', png=base64.b64encode(payload).decode(), linear=True)
+        document = {'textures': [dict(record), dict(record)],
+                    'textureDescriptors': [dict(id='normal', nativeFormat=27)]}
+        calls = []
+        def cancelled():
+            calls.append(1)
+            return len(calls) > 1
+        prepared = materials.prepare_native_textures(document, True, None, cancelled)
+        self.assertEqual(prepared, 1)
+        self.assertIn('blenderPng', document['textures'][0])
+        self.assertNotIn('blenderPng', document['textures'][1])
+
+    def test_prepared_bytes_match_inline_conversion(self):
+        payload = png(2, 2, bytes([0, 128, 127, 255, 0, 33, 66, 222, 17,
+                                   0, 255, 0, 64, 128, 99, 200, 170, 255]))
+        record = dict(name='normal', png=base64.b64encode(payload).decode(), linear=True)
+        document = {'textures': [record], 'textureDescriptors': [dict(id='normal', nativeFormat=27)]}
+        self.assertEqual(materials.prepare_native_textures(document, True), 1)
+        self.assertEqual(record['blenderPng'], materials._native_rg_png(payload))
+
     def test_loader_packs_native_bytes_and_leaves_basic_unchanged(self):
         class Image(dict):
             def __init__(self, path):

@@ -168,9 +168,10 @@ class SORA_OT_weapon_equip(TaskOperator,bpy.types.Operator):
         if not row.can_attempt:self.report({'ERROR'},row.reason);return {'CANCELLED'}
         def complete(result):
             yield from replace_steps(context,owner,weapon,result)
-            context.scene.sora.status='Generic weapon equipped; static mounts only, animation events not evaluated'
+            context.scene.sora.status='Generic weapon equipped; current instance body-event following uses its declared slot'
         try:return tasks.start(self,context,'weapon-assembly',{'root':bpy.path.abspath(context.scene.sora.game_root),
-            'path':rig['sora_database'],'asset':rig['sora_asset'],'weapon':weapon},complete)
+            'path':rig['sora_database'],'asset':rig['sora_asset'],'weapon':weapon},complete,
+            prepare=tasks.native_texture_prepare(owner.get('sora_render_mode')))
         except Exception as error:self.report({'ERROR'},str(error));return {'CANCELLED'}
 
 

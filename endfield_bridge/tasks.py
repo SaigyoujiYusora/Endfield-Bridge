@@ -12,12 +12,32 @@ def busy():
     return _active is not None
 
 
-def start(operator, context, method, parameters, complete):
+def native_texture_prepare(material_mode):
+    """Worker-thread preparation hook for one caller-resolved material mode.
+
+    The operator that will actually create image datablocks passes its own
+    resolved mode, so a pure animation request and a scene whose textures are
+    never loaded do not pay for the conversion, and a mode taken from an
+    existing owner instance is not silently replaced by the global import
+    option. The hook runs in the protocol reader thread and only mutates the
+    decoded result.
+    """
+    if material_mode not in {'RURI', 'NPR'}:
+        return None
+    from .materials import prepare_native_textures
+
+    def prepare(result, emit, cancelled=None):
+        return prepare_native_textures(result, True, lambda completed, total: emit(
+            'Preparing native textures', completed, total, 'Converted on the task worker'), cancelled)
+    return prepare
+
+
+def start(operator, context, method, parameters, complete, prepare=None):
     global _active
     if busy():
         raise CoreError('Wait for or cancel the current task')
     preferences = context.preferences.addons[__package__].preferences
-    task = request_task(bpy.path.abspath(preferences.executable), method, **parameters)
+    task = request_task(bpy.path.abspath(preferences.executable), method, prepare=prepare, **parameters)
     return _attach(operator, context, method, complete, task)
 
 
@@ -32,12 +52,12 @@ def start_local(operator, context, stage, complete):
     return _attach(operator, context, stage, complete, task)
 
 
-def start_batch(operator, context, requests, complete):
+def start_batch(operator, context, requests, complete, stage='Loading owned render sources'):
     from .client import BatchTask
     if busy():raise CoreError('Wait for or cancel the current task')
     preferences=context.preferences.addons[__package__].preferences
     task=BatchTask(bpy.path.abspath(preferences.executable),requests)
-    return _attach(operator,context,'Loading owned render sources',complete,task)
+    return _attach(operator,context,stage,complete,task)
 
 
 def _attach(operator, context, method, complete, task):
@@ -177,16 +197,25 @@ class TaskOperator:
                 self._task.terminate()
                 return _finish(self, context, 'Cancelled')
             if self._steps is not None:
-                try:
-                    with context.temp_override(**self._override):
-                        progress = next(self._steps)
+                # Consume steps until a soft 0.05 s budget is spent so
+                # fine-grained stages do not throttle the import to one step
+                # per timer tick. The budget is checked after next(), so a
+                # single generator step can still run longer; the effective
+                # bound is one step, not the budget value.
+                deadline = time.monotonic() + 0.05
+                while True:
+                    try:
+                        with context.temp_override(**self._override):
+                            progress = next(self._steps)
+                    except StopIteration:
+                        self._steps = None
+                        return _finish(self, context)
                     settings.task_stage = progress['stage']
                     settings.task_detail = str(progress.get('detail') or '')
                     settings.task_completed = progress.get('completed', 0)
                     settings.task_total = progress.get('total', 0)
-                except StopIteration:
-                    self._steps = None
-                    return _finish(self, context)
+                    if self._cancelled or time.monotonic() >= deadline:
+                        break
             else:
                 while True:
                     try:

@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import queue
+import threading
 import types
 import unittest
 from unittest.mock import patch
@@ -53,6 +54,27 @@ class TaskClientTests(unittest.TestCase):
         result = task.events.get(timeout=2)
         self.assertFalse(result['ok'])
         self.assertEqual(result['error']['code'], 'cancelled')
+
+    def test_local_cancel_during_preparation_keeps_real_terminal(self):
+        event = {'protocol':1,'id':'known','ok':True,'committed':True,'result':{'assets':3}}
+        entered, release, seen = threading.Event(), threading.Event(), {}
+        def prepare(result, emit, cancelled=None):
+            seen['before'] = cancelled()
+            entered.set()
+            release.wait(timeout=5)
+            seen['after'] = cancelled()
+        process = FakeProcess([event])
+        with patch.object(client.subprocess, 'Popen', return_value=process), patch('uuid.uuid4', return_value=types.SimpleNamespace(hex='known')):
+            task = client.CoreTask(str(Path(__file__).resolve()), 'database-build', prepare=prepare)
+            self.assertTrue(entered.wait(timeout=5))
+            task.cancel()
+            release.set()
+            delivered = task.events.get(timeout=5)
+        self.assertFalse(seen['before'])
+        self.assertTrue(seen['after'])
+        self.assertEqual(delivered, event)
+        self.assertTrue(delivered['committed'])
+        self.assertEqual(task.terminal, event)
 
 
 if __name__ == '__main__': unittest.main()

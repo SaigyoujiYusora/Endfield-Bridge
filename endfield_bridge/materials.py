@@ -59,6 +59,59 @@ def _native_rg_png(data):
             + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
 
 
+def _texture_documents(node, found):
+    if isinstance(node, dict):
+        if isinstance(node.get('textures'), list):
+            found.append(node)
+        for child in node.values():
+            if isinstance(child, dict) or (isinstance(child, list) and child and isinstance(child[0], dict)):
+                _texture_documents(child, found)
+    elif isinstance(node, list):
+        for child in node:
+            if isinstance(child, dict):
+                _texture_documents(child, found)
+    return found
+
+
+def prepare_native_textures(result, native_channels, report=None, cancelled=None):
+    """Convert native RG payloads on the task worker, never on the main thread.
+
+    The conversion is pure python/zlib and touches no Blender state, so it can
+    run in the protocol reader thread while the main thread stays free to draw.
+    Only nativeFormat 27 records are converted; each is annotated with the
+    channel mode it was prepared for and load_images falls back to inline
+    conversion whenever that mode does not match. ``cancelled`` is polled
+    between textures so a cancel stops the loop at a safe boundary instead of
+    abandoning a half-written payload.
+    """
+    if not native_channels:
+        return 0
+    pending = []
+    for document in _texture_documents(result, []):
+        descriptors = {item.get('id'): item for item in (document.get('textureDescriptors') or [])
+                       if isinstance(item, dict)}
+        for source in document.get('textures') or []:
+            if not isinstance(source, dict) or 'blenderPng' in source or not source.get('png'):
+                continue
+            if descriptors.get(source.get('name'), {}).get('nativeFormat') != 27:
+                continue
+            pending.append(source)
+    if not pending:
+        return 0
+    if report is not None:
+        report(0, len(pending))
+    prepared = 0
+    for completed, source in enumerate(pending, 1):
+        if cancelled is not None and cancelled():
+            break
+        source['blenderPng'] = _native_rg_png(base64.b64decode(source['png'], validate=True))
+        source['blenderPngNativeChannels'] = True
+        prepared = completed
+        if report is not None:
+            report(completed, len(pending))
+    return prepared
+
+
 def load_images(records, token, owned, descriptors=None, native_channels=False):
     metadata = {item["id"]: item for item in (descriptors or [])}
     result = {}
@@ -67,8 +120,14 @@ def load_images(records, token, owned, descriptors=None, native_channels=False):
             path = Path(directory) / f"texture-{index}.png"
             info = metadata.get(source["name"], {})
             native_rg = native_channels and info.get('nativeFormat') == 27
-            png = base64.b64decode(source["png"], validate=True)
-            path.write_bytes(_native_rg_png(png) if native_rg else png)
+            prepared = source.get("blenderPng") if source.get("blenderPngNativeChannels") is native_channels else None
+            if isinstance(prepared, (bytes, bytearray)):
+                png = bytes(prepared)
+            else:
+                png = base64.b64decode(source["png"], validate=True)
+                if native_rg:
+                    png = _native_rg_png(png)
+            path.write_bytes(png)
             image = bpy.data.images.load(str(path), check_existing=False)
             owned.append(image)
             image.name = f"Sora Texture {index}"
@@ -88,11 +147,26 @@ def load_images(records, token, owned, descriptors=None, native_channels=False):
     return result
 
 
-def build_material(records, images, token, mode="BASIC"):
+def build_material_steps(records, images, token, mode="BASIC"):
+    """Generator form of build_material(); the NPR path delegates to the adapter."""
     if mode in {"RURI", "NPR"}:
-        from .ruri_adapter import build_material as ruri_material
-        return ruri_material(records, images, token)
+        from .ruri_adapter import build_material_steps as ruri_material_steps
+        return (yield from ruri_material_steps(records, images, token))
+    yield {"stage": "Building material", "detail": records[0]["name"]}
+    return _build_basic_material(records, images, token, mode)
 
+
+def build_material(records, images, token, mode="BASIC"):
+    """Synchronous driver for build_material_steps(); behaviour is unchanged."""
+    work = build_material_steps(records, images, token, mode)
+    while True:
+        try:
+            next(work)
+        except StopIteration as finished:
+            return finished.value
+
+
+def _build_basic_material(records, images, token, mode):
     material = bpy.data.materials.new(records[0]["name"])
     try:
         material["sora_instance"] = token

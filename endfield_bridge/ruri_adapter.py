@@ -45,11 +45,19 @@ def stacks():
                                          objects=objects, rebuild=rebuild)
 
             def build_material(self, *args, **kwargs):
+                work = self.build_material_steps(*args, **kwargs)
+                while True:
+                    try:
+                        next(work)
+                    except StopIteration as finished:
+                        return finished.value
+
+            def build_material_steps(self, *args, **kwargs):
                 # Assembly may call the upstream light refresh directly.
                 # Invalidate before it can replace the shared table contents.
                 from . import runtime_sync
                 runtime_sync.reset()
-                result = super().build_material(*args, **kwargs)
+                result = yield from super().build_material_steps(*args, **kwargs)
                 mat = args[0] if args else kwargs['mat']
                 if mat.get('endf_npr_transparent_base'):
                     del mat['endf_npr_transparent_base']
@@ -81,6 +89,14 @@ def stacks():
                 finally:
                     self._pending_shader_ref = None
                     self._pending_shader_id = None
+
+            def provider_steps(self, builder, props, ownership=None):
+                # Same ordering guarantee as provider(): reject destructive cache
+                # upgrades before any template is created or renamed. The source
+                # context is set by the upstream generator only around its own
+                # synchronous _param_write fragment, never across a yield.
+                self._check_existing_templates()
+                return (yield from super().provider_steps(builder, props, ownership))
 
             def _check_existing_templates(self, groups_only=False):
                 for mat in bpy.data.materials:
@@ -133,7 +149,7 @@ def stacks():
                         sync_transparent(mat)
                     raise
 
-            def _param_write(self, mat):
+            def _param_write(self, mat, record=None):
                 pending = getattr(self, '_pending_shader_ref', None)
                 if pending is not None:
                     mat['sora_native_shader_ref'] = json.dumps(pending, sort_keys=True)
@@ -147,7 +163,7 @@ def stacks():
                 from .cycles_uniforms import sync
                 sync(self, mat, column)
                 from .npc_customization import sync as sync_customization
-                sync_customization(mat)
+                sync_customization(mat, record)
                 return column
 
             def restore(self):
@@ -224,18 +240,61 @@ def unity_bone_name(armature, bone_name):
     return (bone.get('sora_source_path', '').rsplit('/', 1)[-1] or bone_name) if bone else ''
 
 
-def _discard_failed_materials(before_materials, before_groups):
-    """provider() can fail before returning its newly allocated datablock."""
-    for pending in list(bpy.data.materials):
-        if pending.as_pointer() not in before_materials and pending.users == 0:
-            bpy.data.materials.remove(pending)
-    for pending in list(bpy.data.node_groups):
-        if (pending.as_pointer() not in before_groups and pending.users == 0
-                and pending.get('endf_npc_customization')):
-            bpy.data.node_groups.remove(pending)
+class BuildOwnership:
+    """Per-build record of the datablocks this attempt created or renamed.
+
+    The assembly yields inside provider/instantiate/template and the rewire, so
+    a global before/after delta would also capture datablocks other callbacks
+    created meanwhile. Each creation and rename is therefore recorded at the
+    exact site that performs it and the same record is carried across the whole
+    build.
+    """
+    def __init__(self):
+        self.materials = []
+        self.groups = []
+        self.renames = []
+
+    def material(self, item):
+        if item is not None:
+            self.materials.append(item)
+        return item
+
+    def group(self, item):
+        if item is not None:
+            self.groups.append(item)
+        return item
+
+    def renamed(self, item, old_name, new_name):
+        if item is not None and old_name != new_name:
+            self.renames.append((item, old_name, new_name))
+        return item
+
+    def release(self):
+        """Free this attempt's material first, then its private groups, then undo
+        only the renames this attempt performed and only while the name is still
+        the one this attempt assigned."""
+        for item in self.materials:
+            try:
+                if item.users == 0 and item.library is None:
+                    bpy.data.materials.remove(item)
+            except ReferenceError:
+                pass
+        for item in self.groups:
+            try:
+                if item.users == 0 and item.library is None:
+                    bpy.data.node_groups.remove(item)
+            except ReferenceError:
+                pass
+        for item, old_name, new_name in self.renames:
+            try:
+                if item.name == new_name:
+                    item.name = old_name
+            except (ReferenceError, ValueError):
+                pass
 
 
-def build_material(records, images, token):
+def build_material_steps(records, images, token):
+    """Generator form of the NPR material assembly; build_material() drains it."""
     if len(records) != 1:
         raise ValueError('Each ENDF NPR-Shader material slot requires one record')
     source = records[0]
@@ -251,6 +310,7 @@ def build_material(records, images, token):
         texture_st={k: list(v.get('scale') or [1, 1]) + list(v.get('offset') or [0, 0]) for k, v in bindings.items()},
         disabled_passes=(descriptor.get('renderState') or {}).get('disabledPasses', []))
     builder = SimpleNamespace(options={}, shader_display_name=lambda p: native.get('shaderName'), _load_image=images.get)
+    yield {'stage': 'Resolving NPR shader', 'detail': source['name']}
     for stack in stacks():
         if stack.post is not None:
             continue
@@ -258,27 +318,28 @@ def build_material(records, images, token):
         if resolved is None:
             continue
         part, _ = resolved
+        yield {'stage': 'Instantiating NPR material', 'detail': part + ' · ' + source['name']}
         meta = stack.PART_META[part]
         transparent_base = ((props.floats.get('_SurfaceType', 0) >= 0.5 or meta['transparent'])
                             and not meta.get('multiply') and stack.ST_SLOT in props.textures)
         image_view = None
         original_base = images.get(props.textures.get(stack.ST_SLOT))
-        if transparent_base and original_base is not None:
-            # Alpha interpretation is image-global in Blender. Give the flat
-            # transparent pass a private view before upstream sets STRAIGHT.
-            image_view = original_base.copy()
-            image_view.name = 'ENDF NPR-Shader transparent ' + props.name
-            image_view['sora_instance'] = token
-            image_view['sora_image_view'] = 'transparent BaseMap'
-            image_view.pack()
-            base_id = props.textures[stack.ST_SLOT]
-            builder._load_image = lambda identity: image_view if identity == base_id else images.get(identity)
         material = None
-        prior_names = [(item, item.name) for item in bpy.data.materials]
-        before_materials = {item.as_pointer() for item in bpy.data.materials}
-        before_groups = {item.as_pointer() for item in bpy.data.node_groups}
+        ownership = BuildOwnership()
         try:
-            material = stack.provider(builder, props)
+            if transparent_base and original_base is not None:
+                # Alpha interpretation is image-global in Blender. Give the flat
+                # transparent pass a private view before upstream sets STRAIGHT.
+                # Created inside the try so a cancel during any later yield can
+                # release this attempt's own image copy.
+                image_view = original_base.copy()
+                image_view.name = 'ENDF NPR-Shader transparent ' + props.name
+                image_view['sora_instance'] = token
+                image_view['sora_image_view'] = 'transparent BaseMap'
+                image_view.pack()
+                base_id = props.textures[stack.ST_SLOT]
+                builder._load_image = lambda identity: image_view if identity == base_id else images.get(identity)
+            material = yield from stack.provider_steps(builder, props, ownership)
             if material is None:
                 raise RuntimeError('ENDF NPR-Shader provider declined its resolved shader')
             material['sora_instance'] = token
@@ -293,15 +354,11 @@ def build_material(records, images, token):
                     raise RuntimeError('ENDF NPR-Shader transparent graph lifecycle marker is missing')
             # Cached templates omit engine/world identity; replay the assembly
             # while preserving the deliberate flat transparent graph.
-            rewire_material(stack, material)
+            yield from rewire_material_steps(stack, material, ownership)
             material['sora_ruri_engine'] = bpy.context.scene.render.engine
             return material
-        except Exception:
-            # Shared templates have fake users and survive. Existing unused
-            # user materials are protected by the pre-provider snapshot.
-            _discard_failed_materials(before_materials, before_groups)
-            for existing, name in prior_names:
-                existing.name = name
+        except BaseException:
+            ownership.release()
             if image_view is not None and image_view.users == 0:
                 bpy.data.images.remove(image_view)
             raise
@@ -309,6 +366,16 @@ def build_material(records, images, token):
     material = basic(records, images, token, 'BASIC')
     material['sora_npr_diagnostics'] = 'ENDF NPR-Shader does not claim native shader: ' + str(native.get('shaderName'))
     return material
+
+
+def build_material(records, images, token):
+    """Synchronous driver for build_material_steps(); behaviour is unchanged."""
+    work = build_material_steps(records, images, token)
+    while True:
+        try:
+            next(work)
+        except StopIteration as finished:
+            return finished.value
 
 
 def object_frame(document):
@@ -625,7 +692,8 @@ def audit_capability_links(material):
             and link.to_node.get('ruri_cap') is None]
 
 
-def rewire_material(stack, material):
+def rewire_material_steps(stack, material, ownership=None):
+    """Generator form of rewire_material(); see rewire_material()."""
     if material.get('endf_npr_transparent_base'):
         from .npc_customization import validate_transparent_graph
         validate_transparent_graph(material)
@@ -642,9 +710,10 @@ def rewire_material(stack, material):
     opaque = floats.get('_SurfaceType', 0.0) < 0.5 and not meta['transparent']
     cull = float(floats.get(stack.CULL_PROPERTY, 0.0)) if stack.CULL_PROPERTY else stack.CULL_FIXED
     images = stack._material_images(material)
-    stack.build_material(material, part=part, opaque=opaque,
-                         multiply_blend=bool(meta.get('multiply')), cull=cull, images=images)
-    column = stack._param_write(material)
+    yield {'stage': 'Rebuilding NPR material graph', 'detail': part}
+    yield from stack.build_material_steps(material, part=part, opaque=opaque,
+                                          multiply_blend=bool(meta.get('multiply')), cull=cull, images=images)
+    column = stack._param_write(material, ownership)
     texture_st = dict(material.get('ruri_uber_st') or {})
     st = texture_st.get(stack.ST_SLOT) or [1.0, 1.0, 0.0, 0.0]
     for node in material.node_tree.nodes:
@@ -663,3 +732,13 @@ def rewire_material(stack, material):
     material.update_tag()
     material['endf_npr_capability_signature'] = capability_signature(bpy.context.scene)
     return True
+
+
+def rewire_material(stack, material):
+    """Synchronous driver for rewire_material_steps(); behaviour is unchanged."""
+    work = rewire_material_steps(stack, material)
+    while True:
+        try:
+            next(work)
+        except StopIteration as finished:
+            return finished.value

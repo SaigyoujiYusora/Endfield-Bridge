@@ -25,12 +25,17 @@ def mapping(owner, body_rig, selected, scene_fps):
               and state.get('controllerId') == selected['equipment']['controllerId']
               and state.get('clipId') == selected['cab'] + ':' + selected['pathId']
               and state.get('speed') == 1 and state.get('cycleOffset') == 0]
-    events = [(index, event, state) for index, event in enumerate(matches[0].get('events', []))
-              for state in states if event.get('functionName') == 'WeaponAnim'
-              and event.get('data') == state.get('stateName')]
+    events = [(event['sourceIndex'], event, state, transition)
+              for event in matches[0].get('decodedWeaponEvents') or [] for state in states
+              for transition in state.get('triggerTransitions') or []
+              if event.get('functionName') == 'WeaponAnim' and event.get('paramType') == 0
+              and event.get('slotId') == selected['equipment']['slotId']
+              and event.get('targetStatus') == 'native-declaration-slot'
+              and event.get('triggerName') == transition.get('triggerName')
+              and transition.get('status') == 'native-trigger-any-state' and transition.get('offset') == 0]
     if len(events) != 1:
         raise ValueError('所选装备片段没有唯一匹配的身体 WeaponAnim 事件与原生状态')
-    index, event, state = events[0]
+    index, event, state, transition = events[0]
     seconds = event.get('time')
     if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 0 <= seconds <= metadata.get('duration', -1):
         raise ValueError('身体事件时间超出原生片段')
@@ -40,6 +45,6 @@ def mapping(owner, body_rig, selected, scene_fps):
         raise ValueError('身体动作与当前时间轴帧率不一致')
     return {'fps': fps, 'origin': origin + seconds * fps,
             'proof': {'bodyAction': action.name, 'bodyClipId': identity, 'eventIndex': index,
-                      'event': event, 'controllerState': state,
-                      'targetSelection': 'explicit-user-selected-equipment; packed event target not decoded',
-                      'scope': 'single event time alignment; no visibility, transitions or automatic retiming'}}
+                      'event': event, 'controllerState': state, 'triggerTransition': transition,
+                      'targetSelection': 'native-declaration-slot',
+                      'scope': 'native trigger destination clip aligned to event; transition crossfade and retiming not evaluated'}}

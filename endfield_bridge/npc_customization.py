@@ -136,7 +136,7 @@ def _patch(tree):
         del tree['endf_npr_source_group']
 
 
-def sync(material):
+def sync(material, record=None):
     """Called from the same write/restore path as the existing material table."""
     if material.get('ruri_uber_part') != 'Standard' or material.node_tree is None:
         return
@@ -175,6 +175,11 @@ def sync(material):
     node = nodes[0]
     if node.node_tree.get(MARKER) != STAMP or node.node_tree.users > 1:
         clone = node.node_tree.copy()
+        if record is not None:
+            # Local ENDF2Blend modification: register this private clone with the
+            # per-build ownership record at the copy site so a cancelled import
+            # can release exactly the groups it created.
+            record.group(clone)
         clone.use_fake_user = False
         try:
             if clone.get(MARKER) != STAMP:
