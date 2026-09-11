@@ -526,7 +526,7 @@ class SORA_OT_copy_diagnostics(bpy.types.Operator):
 class SORA_UL_assets(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index=0, flt_flag=0):
         column = layout.column(align=True)
-        column.label(text=item.display_zh or item.name, icon='OUTLINER_OB_MESH')
+        column.label(text=(item.display_zh or item.name) + ' · ' + library_ui.classification_text(item.kind), icon='OUTLINER_OB_MESH')
         column.label(text=item.internal_name + (' [Chinese mapping unavailable]' if not item.display_zh else ''))
 
 
@@ -588,6 +588,7 @@ class SORA_PT_panel(bpy.types.Panel):
                 asset = settings.assets[settings.selected]
                 box.label(text='中文: ' + (asset.display_zh or '中文映射不可用'))
                 box.label(text='内部: ' + asset.internal_name)
+                box.label(text='分类: ' + library_ui.classification_text(asset.kind))
                 box.label(text='可导入' if asset.can_attempt_import else '不可导入：展开详情查看原因',
                           icon='CHECKMARK' if asset.can_attempt_import else 'INFO')
                 box.prop(settings, 'asset_details', icon='DISCLOSURE_TRI_DOWN' if settings.asset_details else 'DISCLOSURE_TRI_RIGHT')

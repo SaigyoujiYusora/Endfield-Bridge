@@ -15,6 +15,14 @@ def search_kind(settings):
     return None
 
 
+CLASSIFICATIONS = {'character': '角色', 'npc': 'NPC', 'weapon': '通用武器'}
+
+
+def classification_text(kind):
+    """User-facing class for one native kind; anything unconfirmed stays 未分类."""
+    return CLASSIFICATIONS.get(kind or '', '未分类')
+
+
 def pages(settings):
     return json.loads(settings.library_pages or '{}')
 
