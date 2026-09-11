@@ -6,6 +6,15 @@ def page(settings):
     return settings.kind if settings.category == 'PEOPLE' else settings.category
 
 
+def search_kind(settings):
+    """Native Sora-Core kind filter for the current library category, or None."""
+    if settings.category == 'PEOPLE':
+        return settings.kind
+    if settings.category == 'ITEMS':
+        return 'weapon'
+    return None
+
+
 def pages(settings):
     return json.loads(settings.library_pages or '{}')
 

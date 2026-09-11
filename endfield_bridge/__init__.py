@@ -285,6 +285,10 @@ class SORA_OT_search(TaskOperator, bpy.types.Operator):
         root = bpy.path.abspath(settings.game_root) if settings.game_root else ''
         signature = (settings.database, settings.game_root, settings.query, settings.category, settings.kind)
         offset = max(0, settings.offset + self.direction * 30) if self.direction else 0
+        kind = library_ui.search_kind(settings)
+        if kind is None:
+            self.report({'ERROR'}, '场景资源库暂不支持搜索。')
+            return {'CANCELLED'}
         try:
             def complete(result):
                 if signature != (settings.database, settings.game_root, settings.query, settings.category, settings.kind):
@@ -317,7 +321,7 @@ class SORA_OT_search(TaskOperator, bpy.types.Operator):
                 settings.source_details = False
                 settings.status = f"{result['total']} matches"
             return tasks.start(self, context, 'search', {'path':database, 'root':root,
-                'query':settings.query, 'kind':settings.kind if settings.category == 'PEOPLE' else 'weapon',
+                'query':settings.query, 'kind':kind,
                 'offset':offset, 'limit':30}, complete)
         except (CoreError, ValueError) as error:
             self.report({'ERROR'}, str(error))
