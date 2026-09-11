@@ -18,9 +18,10 @@ exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionD
 
 def capabilities():
     return {'product':'Sora-Core','methods':['animation-clips','animation-import'],
-            'equipmentAnimation':{'rig':'native-equipment-source-path','sampling':'non-ACL native frame grid',
+            'equipmentAnimation':{'rig':'native-equipment-source-path',
+                'sampling':'non-ACL scalar blocks or ACL transform tracks on the authored native frame grid',
                 'transport':'animation-clips / animation-import with equipment selector',
-                'runtime':'single clip only; no controller/events/visibility/damping','proofContract':m.PROOF_CONTRACT}}
+                'runtime':'single controller layer; trigger and exit-time transitions with local TRS crossfade; no visibility or damping','proofContract':m.PROOF_CONTRACT}}
 
 
 def fixture():

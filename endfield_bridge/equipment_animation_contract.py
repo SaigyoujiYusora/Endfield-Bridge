@@ -17,9 +17,9 @@ def supported(capabilities):
     return (capabilities.get('product')=='Sora-Core' and isinstance(feature,dict) and
             feature.get('proofContract')==PROOF_CONTRACT and
             feature.get('rig')=='native-equipment-source-path' and
-            feature.get('sampling')=='non-ACL native frame grid' and
+            feature.get('sampling')=='non-ACL scalar blocks or ACL transform tracks on the authored native frame grid' and
             feature.get('transport')=='animation-clips / animation-import with equipment selector' and
-            feature.get('runtime')=='single clip only; no controller/events/visibility/damping' and
+            feature.get('runtime')=='single controller layer; trigger and exit-time transitions with local TRS crossfade; no visibility or damping' and
             isinstance(methods,list) and all(isinstance(v,str) for v in methods) and
             {'animation-clips','animation-import'} <= set(methods))
 
@@ -194,7 +194,9 @@ def validate_import(result, expected, selected, live_bones, canonical=False):
         raise ValueError('Equipment clip.native.source differs from selected native identity')
     if clip.get('name')!=selected['name']:raise ValueError('Equipment clip name differs from selected source')
     rate=proof.get('sampleRate')
-    if type(rate) not in (int,float) or not math.isfinite(rate) or not 1<=rate<=240 or any(abs(t-i/rate)>1e-9 for i,t in enumerate(times)):
+    # Native frame steps i/rate, with the authored interval end kept as the final exact time when that end
+    # is not itself on the frame grid; the same contract the equipment timeline uses.
+    if type(rate) not in (int,float) or not math.isfinite(rate) or not 1<=rate<=240 or any(abs(t-min(i/rate,times[-1]))>1e-9 for i,t in enumerate(times)):
         raise ValueError('Equipment proof times differ from the authored frame grid')
     channels=set()
     for track in clip.get('tracks',[]):
@@ -215,9 +217,13 @@ def validate_import(result, expected, selected, live_bones, canonical=False):
         raise ValueError('Equipment clip does not cover every native bone channel')
     schema={}
     for row in discovery_schema(selected,expected):
+        # ACL clips also carry their own Animator scalar bindings (type 95, the known root scalar stream);
+        # only Transform channels describe the dedicated-equipment pose and the ACL stream already carries them.
+        # Every other binding kind stays an explicit unsupported-schema failure.
+        if row['typeId']==95:continue
         pair=(row['pathHash'],row['attribute'])
         if pair in schema:raise ValueError('Discovered binding path/attribute is duplicated')
-        if row['attribute'] not in (1,2,3) or row['typeId']!=4 or row['customType']!=0 or row['isPPtrCurve']!=0 or row['resolution']!='native-path':
+        if row['typeId']!=4 or row['attribute'] not in (1,2,3) or row['customType']!=0 or row['isPPtrCurve']!=0 or row['resolution']!='native-path':
             raise ValueError('Selected discovery schema has unsupported or unresolved bindings')
         schema[pair]=row
     bindings=proof.get('bindings')
