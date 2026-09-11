@@ -3,8 +3,12 @@ import json
 
 import bpy
 
-CATEGORIES = [('ALL', '全部部位', ''), ('EYE', '眼', ''), ('BROW', '眉', ''),
-              ('MOUTH', '嘴', ''), ('UNKNOWN', '未分类', '')]
+# ALL/EYE/BROW/MOUTH/UNKNOWN keep their persisted 0/1/2/3/4 slot numbers; new
+# categories are appended so an already saved filter value cannot be re-read as
+# a different category.
+CATEGORIES = [('ALL', '全部分类', ''), ('EYE', '眼', ''), ('BROW', '眉', ''),
+              ('MOUTH', '嘴', ''), ('UNKNOWN', '未分类', ''), ('EAR', '耳', ''),
+              ('SHADER', '材质驱动', ''), ('EMOTION', '表情预设', ''), ('POSE', '形态预设', '')]
 KINDS = [('ALL', '全部类型', ''), ('CONTROL', '单控制', ''),
          ('PRESET', '组合预设', ''), ('SHADER', '材质驱动', '')]
 
@@ -24,6 +28,17 @@ def preset_identity(preset):
 
 
 def category(control):
+    native = control.get('classification')
+    if isinstance(native, dict) and native.get('category'):
+        key = native['category']
+        confidence = native.get('confidence') or 'unknown'
+        body = '规则 {0}；来源 {1}；置信 {2}'.format(
+            native.get('rule', ''), native.get('source', ''), confidence)
+        if key == 'UNKNOWN':
+            return key, '未分类（' + body + '）'
+        label = dict((item[0], item[1]) for item in CATEGORIES).get(key, key)
+        prefix = '原生分类' if confidence == 'native' else '推断分类（原生字段映射）' if confidence == 'inferred' else '未判定分类'
+        return key, '{0} {1}（{2}）'.format(prefix, label, body)
     known = {'eye': 'EYE', 'eyes': 'EYE', '眼': 'EYE', 'brow': 'BROW', 'eyebrow': 'BROW',
              '眉': 'BROW', 'mouth': 'MOUTH', '嘴': 'MOUTH'}
     for field in ('category', 'partName'):
@@ -33,8 +48,8 @@ def category(control):
     for result, tokens in [('BROW', ('brow', '眉')), ('EYE', ('eye', 'lid', 'blink', '眼', '瞳')),
                            ('MOUTH', ('mouth', 'lip', 'jaw', 'tongue', '嘴', '唇', '舌'))]:
         if any(token in name for token in tokens):
-            return result, '名称规则 name-rule-v1 推断（非原生部位枚举）'
-    return 'UNKNOWN', '未识别部位；未解释原生 partType 数值'
+            return result, '名称规则 name-rule-v1 推断（描述符无原生分类字段）'
+    return 'UNKNOWN', '未分类：描述符无原生分类字段且名称未命中 name-rule-v1'
 
 
 def selected_changed(self, _context):
@@ -56,7 +71,7 @@ class SORA_FaceBrowserState(bpy.types.PropertyGroup):
     index: bpy.props.IntProperty(default=0, min=0, update=selected_changed)
     selected_identity: bpy.props.StringProperty()
     query: bpy.props.StringProperty(name='搜索原生名称')
-    category: bpy.props.EnumProperty(name='部位', items=CATEGORIES)
+    category: bpy.props.EnumProperty(name='分类', items=CATEGORIES)
     kind: bpy.props.EnumProperty(name='类型', items=KINDS)
     favorites_only: bpy.props.BoolProperty(name='常用', default=False)
     modified_only: bpy.props.BoolProperty(name='已修改控制', default=False,
