@@ -130,6 +130,10 @@ def create_scene_steps(context, document, material_mode=None):
             collection.objects.link(obj)
             obj["sora_instance"] = token
             obj["sora_render_mesh_index"] = mesh_index
+            # Native m_Enabled=false parts keep geometry/slots but start hidden; absent means enabled.
+            if not source.get("rendererEnabled", True):
+                obj.hide_viewport = True
+                obj.hide_render = True
             mesh.from_pydata(source["positions"], [], source["triangles"])
             mesh.update()
             for polygon in mesh.polygons:
