@@ -192,6 +192,8 @@ class SORA_OT_animation_import(TaskOperator, bpy.types.Operator):
                 message = 'Loaded ' + result['body']['clip']['name']
                 if equipment_targets: message += f'; {len(equipment_targets)} native equipment timelines loaded'
                 if action.get('sora_face_mode') == 'MANUAL': message += '; manual Face controls override retained face keys'
+                unbound=(result['body']['clip'].get('native') or {}).get('unboundTransformTracks') or []
+                if unbound: message += f'; {len(unbound)} unbound native transform tracks preserved without a target bone'
                 set_status(context, settings, message)
             return tasks.start_batch(self, context, jobs, complete, stage='Loading body and native equipment timelines')
         except (CoreError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as error:

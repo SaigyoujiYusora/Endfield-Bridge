@@ -508,11 +508,26 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
         for name in rotation_bones:
             rig.pose.bones[name].rotation_mode = 'QUATERNION'
         action.use_fake_user = True
+        # The authored native end can sit past the last decoded sample (walk loop: 65 samples at 60 Hz,
+        # grid 1.0666667 s, authored 1.0709809 s). Declare the effective Action range from the authored
+        # interval so consumers (Action range, NLA strip action_frame_end) keep the whole tail. Key times
+        # stay exactly as decoded: no sample key is fabricated and no authored duration is shortened.
+        native_end = frame_origin + duration * fps
+        snapped_end = math.floor(native_end + .5)
+        if abs(native_end - snapped_end) <= 1e-6:
+            native_end = snapped_end
+        if hasattr(action, 'use_frame_range'):
+            action.use_frame_range = True
+            action.frame_start = frame_origin
+            action.frame_end = native_end
         if timeline is None:
             context.scene.render.fps = max(1, round(fps))
             context.scene.render.fps_base = context.scene.render.fps / fps
             context.scene.frame_start = 1
-            context.scene.frame_end = max(1, math.ceil(duration*fps) + 1)
+            # A sample-grid duration can round a few ULPs above the exact grid end (8.333333333333334 * 60 =
+            # 500.00000000000006), which would append a whole extra frame past the last authored key. Absorb that
+            # boundary noise before ceil; a real sub-sample tail (walk loop 1.0709809) still keeps its extra frame.
+            context.scene.frame_end = max(1, math.ceil(duration*fps - 1e-9) + 1)
             _refresh_frame(context, rig, 1)
         else:
             rig.update_tag()
