@@ -349,7 +349,8 @@ def apply_clip(context, rig, clip, bone_names, bone_sources=None, keep_face_cont
             return finished.value
 
 
-def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_face_controls=False, *, timeline=None):
+def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_face_controls=False, *, timeline=None,
+                     transaction=None):
     if rig is not None and rig.get('sora_pose_resume'):
         raise ValueError('Restore suspended animation before loading another clip')
     if context.mode not in {'OBJECT', 'POSE'}:
@@ -432,11 +433,16 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
     registry_state = rig.get('sora_anim_scalar_map')
     previous_override = _properties(rig, ('sora_face_override_action',))
     action = bpy.data.actions.new(clip['name'])
+    # Transaction ownership is recorded the moment the datablock exists, so a failure later in this same
+    # import still identifies this action as this transaction's own data even if it is never bound.
+    if transaction is not None:
+        action['sora_skill_transaction'] = transaction
     try:
         action['sora_instance'] = rig['sora_instance']
-        if timeline is not None:
-            action['sora_timeline_mapping']=json.dumps({'sourceFps':source_fps,'actionFps':fps,'frameOrigin':frame_origin,
-                'frameEnd':frame_origin+duration*fps,'durationSeconds':duration,'sceneTimingPreserved':True})
+        # The mapping recorded here is the mapping the keys were written with, so readers never have to
+        # assume a frame origin or frame rate.
+        action['sora_timeline_mapping']=json.dumps({'sourceFps':source_fps,'actionFps':fps,'frameOrigin':frame_origin,
+            'frameEnd':frame_origin+duration*fps,'durationSeconds':duration,'sceneTimingPreserved':True})
         action['sora_animation_owner'] = uuid.uuid4().hex
         action['sora_clip_metadata'] = json.dumps({k:v for k,v in clip.items() if k not in {'tracks','scalarTracks'}}, separators=(',', ':'))
         action['sora_track_metadata'] = json.dumps([{k:v for k,v in track.items() if k != 'keys'} for track in clip['tracks']], separators=(',', ':'))

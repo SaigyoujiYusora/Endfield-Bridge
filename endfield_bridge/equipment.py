@@ -71,8 +71,40 @@ def resolve_bone(rig,state):
     return matches[0]
 
 
+def owner_main_model_root(rig):
+    """The imported owner main model prefab root of this rig's instance.
+
+    AbilitySystem.battleRoot is Entity.modelCom -> main model GameObject.transform; for this importer the
+    instance root object of the owner collection is the representation of that loaded main model root."""
+    collection=next((c for c in rig.users_collection if c.get('sora_instance')==rig.get('sora_instance')),None)
+    if collection is None:return None
+    roots=[obj for obj in collection.objects if obj.parent is None and obj.get('sora_instance')==rig.get('sora_instance')]
+    armatures=[obj for obj in roots if obj.type=='ARMATURE']
+    if len(armatures)==1:return armatures[0]
+    return roots[0] if len(roots)==1 else None
+
+
+def bind_main_model_root(context,rig,attachment,state,scale):
+    """GetNodeTransform(0)=battleRoot: Transform.SetParent(main model root,false) keeps the weapon's own
+    local transform, so the parent inverse stays identity and the authored local matrix is preserved."""
+    root=owner_main_model_root(rig)
+    if root is None:raise ValueError('Owner main model root is unavailable')
+    attachment.parent=root
+    attachment.parent_type='OBJECT'
+    attachment.parent_bone=''
+    attachment.matrix_parent_inverse=Matrix.Identity(4)
+    attachment.matrix_basis=mat(state['localMatrix'])
+    context.view_layer.update()
+    attachment['sora_attachment_node_id']=state.get('attachmentNodeId')
+    attachment['sora_attachment_source_path']=state.get('attachmentSourcePath')
+    attachment['sora_attachment_error']=0.0
+    attachment['sora_attachment_policy']='owner-main-model-root'
+
+
 def bind(context,rig,attachment,state,scale):
     validate_wire(state,scale)
+    if state.get('targetKind')=='owner-main-model-root':
+        return bind_main_model_root(context,rig,attachment,state,scale)
     bone=resolve_bone(rig,state)
     canonical=next((c.get('sora_render_canonical') for c in rig.users_collection if c.get('sora_instance')==rig.get('sora_instance')),False)
     basis=Matrix.Diagonal((-1.,-1.,1.,1.)) if canonical else Matrix.Identity(4)
