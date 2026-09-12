@@ -188,6 +188,7 @@ def create_dedicated_steps(context,collection,rig,assembly,material_mode=None,st
         from . import equipment_events
         collection[equipment_events.ENABLED]=True
         collection[equipment_events.STATUS]='身体事件跟随已开启；等待当前角色的原生身体动作'
+        equipment_events.defer_sync(context.scene)
     except BaseException:
         for child in reversed(created):remove_scene(context,child,force_cleanup=True)
         if prior is None:

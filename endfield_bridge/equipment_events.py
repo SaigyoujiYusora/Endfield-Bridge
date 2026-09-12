@@ -73,8 +73,8 @@ def restore(child, clear=False):
         if PARENT in child: del child[PARENT]
 
 
-def pause(owner, restore_baseline=True):
-    owner[ENABLED] = False
+def pause(owner, restore_baseline=True, keep_enabled=False):
+    if not keep_enabled: owner[ENABLED] = False
     for child in eq.owned_children(owner):
         if child.get('sora_equipment_role') not in {'dedicated', 'generic'}:
             continue
@@ -83,7 +83,10 @@ def pause(owner, restore_baseline=True):
         else:
             for key in (BASE, PARENT, APPLIED):
                 if key in child: del child[key]
-    status(owner, '已暂停身体事件跟随；当前实例使用手动静态状态')
+    if keep_enabled:
+        status(owner, '前端已卸载：已恢复静态基线；跟随意图已保留，重新加载后自动恢复')
+    else:
+        status(owner, '已暂停身体事件跟随；当前实例使用手动静态状态')
 
 
 def body_events(scene, owner, assembly):
@@ -91,26 +94,27 @@ def body_events(scene, owner, assembly):
     animation = rig.animation_data if rig else None
     action = animation.action if animation else None
     if action is None or rig.get('sora_pose_resume'):
-        return None, '身体动作未绑定或已挂起；恢复静态基线'
+        return None, '身体动作未绑定或已挂起；恢复静态基线', 0
     if action.get('sora_instance') != rig.get('sora_instance'):
-        return None, '身体动作不属于当前实例；恢复静态基线'
+        return None, '身体动作不属于当前实例；恢复静态基线', 0
     if any(not track.mute for track in animation.nla_tracks):
-        return None, '身体 NLA 混合时间尚不支持事件跟随；恢复静态基线'
+        return None, '身体 NLA 混合时间尚不支持事件跟随；恢复静态基线', 0
     metadata = json.loads(action.get('sora_clip_metadata', '{}'))
     source = (metadata.get('native') or {}).get('source') or {}
     identity = str(source.get('cab', '')) + ':' + str(source.get('pathId', ''))
     matches = [clip for clip in (assembly.get('animationConfig') or {}).get('clips') or []
                if clip.get('sourceId') == identity]
     if len(matches) != 1 or matches[0].get('decodedWeaponEvents') is None:
-        return None, '身体源片段缺少唯一已解码武器事件记录；请重新加载装备关联'
+        return None, '身体源片段缺少唯一已解码武器事件记录；请重新加载装备关联', 0
     timeline = json.loads(action.get('sora_timeline_mapping', '{}'))
     fps = timeline.get('actionFps', metadata.get('fps'))
     origin = timeline.get('frameOrigin', 1)
     if not fps or fps <= 0:
-        return None, '身体源动作缺少时间轴映射'
+        return None, '身体源动作缺少时间轴映射', 0
     seconds = (scene.frame_current_final - origin) / fps
-    events = [event for event in matches[0]['decodedWeaponEvents'] if event['time'] <= seconds]
-    return sorted(events, key=lambda event: (event['time'], event['sourceIndex'])), ''
+    authored = matches[0]['decodedWeaponEvents']
+    events = [event for event in authored if event['time'] <= seconds]
+    return sorted(events, key=lambda event: (event['time'], event['sourceIndex'])), '', len(authored)
 
 
 def apply(context, owner):
@@ -119,7 +123,7 @@ def apply(context, owner):
     children = {(child['sora_equipment_role'], child['sora_equipment_slot']): child
                 for child in eq.owned_children(owner)
                 if child.get('sora_equipment_role') in {'dedicated', 'generic'}}
-    events, message = body_events(context.scene, owner, assembly)
+    events, message, authored = body_events(context.scene, owner, assembly)
     if events is None:
         for child in children.values():
             if APPLIED in child: restore(child)
@@ -155,7 +159,7 @@ def apply(context, owner):
             planned[key].update(viewport=True, render=True)
         else:
             unsupported.add('事件缺少已解码模型显隐状态；请重新加载装备关联')
-        if event.get('hideWithEffect'):
+        if event.get('hideWithEffect') and event.get('visible') is False:
             unsupported.add('隐藏特效未模拟；模型显隐已按原生事件执行')
     dedicated = {slot['slotId']: slot for slot in assembly['slots']}
     generic = {slot['slotId']: slot for slot in json.loads(owner.get(generic_weapons.CONTRACT, '{}')).get('genericSlots', [])}
@@ -180,8 +184,14 @@ def apply(context, owner):
                 generic_weapons.bind(context, owner, root, target)
         child.hide_viewport, child.hide_render = desired['viewport'], desired['render']
         child[APPLIED] = signature
-    status(owner, ('身体原生事件跟随：逐槽 Idle/Fight 挂点与模型显隐' if events else '当前时间之前没有武器事件；保持静态基线')
-                     + ('；未完成：' + '；'.join(sorted(unsupported)) if unsupported else ''))
+    baseline = {'idle': 'Idle', 'fight': 'Fight'}.get(owner.get(eq.STATE), '未选择')
+    if events:
+        text = '身体原生事件跟随：逐槽 Idle/Fight 挂点与模型显隐'
+    elif authored == 0:
+        text = '该身体片段没有原生装备显隐事件；保持手动静态基线：' + baseline + '（可用 Idle/Fight 静态按钮显式选择）'
+    else:
+        text = '当前时间之前没有武器事件；保持手动静态基线：' + baseline
+    status(owner, text + ('；未完成：' + '；'.join(sorted(unsupported)) if unsupported else ''))
 
 
 def sync(scene):
@@ -241,21 +251,28 @@ def draw(layout, context, owner):
     wrapped_label(layout, owner.get(STATUS, '身体事件跟随未开启'), context)
 
 
+def _resume():
+    for scene in bpy.data.scenes: defer_sync(scene)
+    return None
+
+
 def register():
     bpy.utils.register_class(SORA_OT_equipment_events)
     for handlers, callback in ((bpy.app.handlers.frame_change_post, changed),
             (bpy.app.handlers.depsgraph_update_post, changed), (bpy.app.handlers.load_post, reloaded),
             (bpy.app.handlers.undo_post, reloaded)):
         if callback not in handlers: handlers.append(callback)
+    if not bpy.app.timers.is_registered(_resume): bpy.app.timers.register(_resume, first_interval=0.0)
 
 
 def unregister():
     if bpy.app.timers.is_registered(_flush_pending): bpy.app.timers.unregister(_flush_pending)
+    if bpy.app.timers.is_registered(_resume): bpy.app.timers.unregister(_resume)
     _pending_scenes.clear()
     for handlers, callback in ((bpy.app.handlers.frame_change_post, changed),
             (bpy.app.handlers.depsgraph_update_post, changed), (bpy.app.handlers.load_post, reloaded),
             (bpy.app.handlers.undo_post, reloaded)):
         if callback in handlers: handlers.remove(callback)
     for owner in bpy.data.collections:
-        if owner.get(ENABLED): pause(owner)
+        if owner.get(ENABLED): pause(owner, keep_enabled=True)
     bpy.utils.unregister_class(SORA_OT_equipment_events)
