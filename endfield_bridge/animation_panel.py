@@ -11,6 +11,12 @@ from .tasks import TaskOperator
 
 def target(context):
     obj = context.object
+    if obj and obj.get('sora_display_source'):
+        # A displayed aid carries only the instance token and the source rig
+        # pointer; resolve through that stable pointer so selecting the
+        # visible helper keeps the POSE/Animation entry working while the
+        # source armature object is hidden.
+        obj = obj['sora_display_source']
     if obj and obj.get('sora_owner_collection'):
         owner = obj['sora_owner_collection']
         obj = next((o for o in owner.objects if o.type == 'ARMATURE' and not o.get('sora_display_source')), None)
@@ -51,6 +57,7 @@ def invalidate_results(settings, context=None):
 class SORA_AnimationSettings(bpy.types.PropertyGroup):
     game_root: StringProperty(name='Game Folder', subtype='DIR_PATH')
     query: StringProperty(name='Find animation',update=invalidate_results)
+    skill: StringProperty(name='Skill resource')
     category: EnumProperty(name='Category',items=[(v,v.title(),'') for v in ('all','idle','move','attack','skill','interaction','unclassified')],update=invalidate_results)
     offset: IntProperty(default=0,min=0)
     total: IntProperty(default=0)
@@ -221,6 +228,50 @@ class SORA_OT_animation_face(bpy.types.Operator):
             return {'CANCELLED'}
 
 
+class SORA_OT_animation_skill(TaskOperator, bpy.types.Operator):
+    bl_idname = 'sora.animation_skill'
+    bl_label = 'Load skill animation (body + native slots)'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode in {'OBJECT', 'POSE'} and target(context) is not None
+
+    def execute(self, context):
+        from . import skill_animation
+        settings = context.scene.sora_animation
+        rig = target(context)
+        try:
+            if settings.result_owner is not None and settings.result_owner != rig:
+                raise ValueError('Search animations for the current instance first')
+            if not context.scene.sora.game_root.strip():
+                raise ValueError('Choose the native Game Folder')
+            skill = settings.skill.strip()
+            if not skill:
+                raise ValueError('输入技能资源名，例如 Json/SkillData/chr_0032_lizhiyan_attack1.json')
+            owner, jobs, targets, plan = skill_animation.requests(context, rig, skill)
+            body = plan['body']
+            def complete(result):
+                if target(context) != rig:
+                    raise ValueError('Animation target changed before binding')
+                action, applied, released = yield from skill_animation.apply_steps(context, rig, owner, targets,
+                    result, plan, settings.keep_face_controls)
+                message = 'Loaded skill ' + result['body']['clip']['name']
+                if targets: message += f'; {len(targets)} native skill windows loaded'
+                elif plan.get('equipmentScope') == 'body-only-no-native-equipment-animator':
+                    message += '; body animation only; native equipment Animator is not declared'
+                if released: message += f'; {len(released)} previous skill playback released'
+                if applied:
+                    hidden = [row['slotId'] for row in applied if not row['visible']]
+                    message += f'; authored visibility applied to {len(applied)} slots' + (f' ({len(hidden)} hidden)' if hidden else '')
+                set_status(context, settings, message)
+            return tasks.start_batch(self, context, jobs, complete, stage='Loading skill body and native windows')
+        except (CoreError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as error:
+            set_status(context, settings, str(error))
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+
+
 def draw(layout, context):
     settings = context.scene.sora_animation
     layout.label(text='Uses the shared Game Folder')
@@ -243,6 +294,9 @@ def draw(layout, context):
         layout.template_list('UI_UL_list', 'native_animation_clips', settings, 'clips', settings, 'selected_clip', rows=3)
     layout.prop(settings, 'keep_face_controls')
     layout.operator('sora.animation_import')
+    column = layout.column(align=True)
+    column.prop(settings, 'skill')
+    column.operator('sora.animation_skill')
     rig = target(context)
     action = rig.animation_data.action if rig and rig.animation_data else None
     from . import face_controls as face
@@ -257,7 +311,7 @@ def draw(layout, context):
 
 
 CLASSES = (SORA_AnimationRow, SORA_AnimationClipRow, SORA_AnimationSettings, SORA_OT_animation_search,
-           SORA_OT_animation_clips, SORA_OT_animation_import, SORA_OT_animation_face)
+           SORA_OT_animation_clips, SORA_OT_animation_import, SORA_OT_animation_face, SORA_OT_animation_skill)
 
 
 def register():

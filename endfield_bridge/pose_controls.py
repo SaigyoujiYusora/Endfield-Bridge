@@ -354,7 +354,19 @@ class SORA_OT_pose_display(bpy.types.Operator):
             return {'CANCELLED'}
         existing=next((o for o in bpy.data.objects if o.get('sora_display_source')==rig),None)
         if existing:
-            existing.hide_set(not existing.hide_get())
+            # The aid is only readable when the native 411-bone skeleton does
+            # not overlap it, so showing the aid hides the source armature
+            # object and hiding the aid restores the user's own visibility.
+            # Record the source state on every show so a manual hide while the
+            # aid is off is restored rather than the state from first creation.
+            showing=existing.hide_get()
+            if showing:
+                existing['sora_display_rig_hidden']=rig.hide_get()
+            existing.hide_set(not showing)
+            if showing:
+                rig.hide_set(True)
+            elif 'sora_display_rig_hidden' in existing:
+                rig.hide_set(bool(existing['sora_display_rig_hidden']))
             return {'FINISHED'}
         helper=None;data=None
         active=context.view_layer.objects.active
@@ -390,10 +402,16 @@ class SORA_OT_pose_display(bpy.types.Operator):
                 stretch.head_tail=0.0
                 stretch.rest_length=bone.bone.length
             data.display_type='STICK';helper.show_in_front=True
+            helper['sora_display_rig_hidden']=rig.hide_get()
+            rig.hide_set(True)
+            context.view_layer.update()
             return {'FINISHED'}
         except Exception as error:
             if helper and helper.mode!='OBJECT':bpy.ops.object.mode_set(mode='OBJECT')
-            if helper:bpy.data.objects.remove(helper,do_unlink=True)
+            if helper:
+                prior=helper.get('sora_display_rig_hidden')
+                bpy.data.objects.remove(helper,do_unlink=True)
+                if prior is not None:rig.hide_set(bool(prior))
             if data and data.users==0:bpy.data.armatures.remove(data)
             self.report({'ERROR'},str(error));return {'CANCELLED'}
         finally:
