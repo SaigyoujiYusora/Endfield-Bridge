@@ -27,6 +27,7 @@ class Datablocks(list):
 class Material(dict):
     name = 'Character transparent cloth'
     users = 0
+    library = None
     surface_render_method = 'BLENDED'
 
     def as_pointer(self):
@@ -178,23 +179,32 @@ class Contracts(unittest.TestCase):
             def _variant(self, builder, props): return 'Standard', 0
             def _load_images(self, builder, props): return {'_BaseMap': NS(name='BaseMap')}
             def _cull_mode(self, props): return 0
-            def instantiate(self, *args, **kwargs): return mat, 1
+            def _check_existing_templates(self, groups_only=False): return None
+            def instantiate_steps(self, name, part, images=None, opaque=True, multiply_blend=False, cull=2.0, ownership=None):
+                if ownership is not None:
+                    ownership.material(mat)
+                yield {'stage': 'Instantiating NPR material', 'detail': name}
+                return mat, 1
             def _shader_name(self, builder, props): return 'HGRP/CharacterNPR'
             def _transparent_base_output(self, material, image, props):
                 material.node_tree = flat_graph()
                 events.append('flat graph built')
-            def _param_write(self, material):
+            def _param_write(self, material, ownership=None):
                 self.assert_marker = material.get('endf_npr_transparent_base')
                 npc.sync(material)
                 events.append('parameters synchronized')
                 return 1
         provider = load_method(ROOT / 'vendor/ruri_npr/ruri_endfield.py', 'provider')
+        vendor_steps = load_method(ROOT / 'vendor/ruri_npr/ruri_endfield.py', 'provider_steps')
+        adapter_steps = load_method(ROOT / 'ruri_adapter.py', 'provider_steps')
         override = load_method(ROOT / 'ruri_adapter.py', '_transparent_base_output')
-        cls = ast.ClassDef(name='Candidate', bases=[ast.Name(id='Base', ctx=ast.Load())],
-                           keywords=[], body=[provider, override], decorator_list=[])
+        vendor = ast.ClassDef(name='Vendor', bases=[ast.Name(id='Base', ctx=ast.Load())],
+                              keywords=[], body=[provider, vendor_steps], decorator_list=[])
+        candidate = ast.ClassDef(name='Candidate', bases=[ast.Name(id='Vendor', ctx=ast.Load())],
+                                 keywords=[], body=[adapter_steps, override], decorator_list=[])
         env = {'Base': Base, '__name__': 'contract_package.adapter', '__package__': 'contract_package',
                'bpy': self.bpy, '_mixed': lambda value: dict(value or {}), 'LINK_TEMPLATES_OPTION': 'link'}
-        exec(compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), '<actual provider and override>', 'exec'), env)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[vendor, candidate], type_ignores=[])), '<actual provider and override>', 'exec'), env)
         props = NS(name=mat.name, floats={npc.ENABLE: 0, '_SurfaceType': 1},
                    colors={name: [1, 1, 1, 1] for name in npc.COLORS}, texture_st={}, shader_ref={})
         stack = env['Candidate']()
@@ -242,12 +252,24 @@ class Contracts(unittest.TestCase):
         old_group = Material(endf_npc_customization=self.npc.STAMP)
         failed_group = Material(endf_npc_customization=self.npc.STAMP)
         shared_group = Material(endf_npr_source_group='shared')
+        shared_group.users = 1
         self.bpy.data.materials = Datablocks([old, failed, shared])
         self.bpy.data.node_groups = Datablocks([old_group, failed_group, shared_group])
-        method = load_method(ROOT / 'ruri_adapter.py', '_discard_failed_materials')
+        ownership_class = next(node for node in ast.walk(
+            ast.parse((ROOT / 'ruri_adapter.py').read_text(encoding='utf-8')))
+            if isinstance(node, ast.ClassDef) and node.name == 'BuildOwnership')
         env = {'bpy': self.bpy}
-        exec(compile(ast.Module(body=[method], type_ignores=[]), '<actual cleanup>', 'exec'), env)
-        env['_discard_failed_materials']({old.as_pointer()}, {old_group.as_pointer()})
+        exec(compile(ast.Module(body=[ownership_class], type_ignores=[]), '<actual cleanup>', 'exec'), env)
+        # cleanup is now the per-build ownership record: it only frees datablocks
+        # this attempt created, and only while unused and not from a library.
+        ownership = env['BuildOwnership']()
+        ownership.material(failed)
+        ownership.group(failed_group)
+        # A datablock the failed attempt did create but another consumer already
+        # shares must survive the rollback, exactly like the old protected set.
+        ownership.material(shared)
+        ownership.group(shared_group)
+        ownership.release()
         self.assertEqual([id(x) for x in self.bpy.data.materials], [id(old), id(shared)])
         self.assertEqual([id(x) for x in self.bpy.data.node_groups], [id(old_group), id(shared_group)])
 

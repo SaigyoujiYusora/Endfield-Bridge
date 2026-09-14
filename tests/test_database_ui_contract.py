@@ -1,17 +1,24 @@
 import ast
+import importlib.util
 from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1]/'endfield_bridge'
-ns={'CoreError':RuntimeError}
+# invalidate_source() calls the real library_ui.source_changed(); load that
+# module (json-only) rather than stubbing the callee.
+spec=importlib.util.spec_from_file_location('contract_package.library_ui', ROOT/'library_ui.py')
+library_ui=importlib.util.module_from_spec(spec);spec.loader.exec_module(library_ui)
+ns={'CoreError':RuntimeError,'library_ui':library_ui}
 tree=ast.parse((ROOT/'__init__.py').read_text(encoding='utf-8'))
 exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in {'invalidate','invalidate_source','database_budget','database_budget_lines','database_parameters','database_complete'}],type_ignores=[]),'<database contract>','exec'),ns)
-tree=ast.parse((ROOT/'animation_panel.py').read_text())
+# Source files carry UTF-8 non-ASCII text; the Windows locale default (GBK)
+# cannot decode them, so pin the encoding instead of relying on the locale.
+tree=ast.parse((ROOT/'animation_panel.py').read_text(encoding='utf-8'))
 exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='set_status'],type_ignores=[]),'<animation status>','exec'),ns)
 
 def settings(database='test.sredb'):
-    return NS(game_root='game',database=database,assets=['stale'],selected=0,result_database='old',offset=30,total=99,source_details=False,status='Imported old asset')
+    return NS(game_root='game',database=database,assets=['stale'],selected=0,result_database='old',offset=30,total=99,source_details=False,status='Imported old asset',category='PEOPLE',kind='character',library_pages='{}',library_page='')
 
 class DatabaseUiContractTests(unittest.TestCase):
     def compatibility(self, **changes):
