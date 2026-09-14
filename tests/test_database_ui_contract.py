@@ -1,5 +1,6 @@
 import ast
 import importlib.util
+import os
 from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
@@ -9,9 +10,10 @@ ROOT=Path(__file__).resolve().parents[1]/'endfield_bridge'
 # module (json-only) rather than stubbing the callee.
 spec=importlib.util.spec_from_file_location('contract_package.library_ui', ROOT/'library_ui.py')
 library_ui=importlib.util.module_from_spec(spec);spec.loader.exec_module(library_ui)
-ns={'CoreError':RuntimeError,'library_ui':library_ui}
+ns={'CoreError':RuntimeError,'library_ui':library_ui,'join':os.path.join,
+    'bpy':NS(path=NS(abspath=lambda value:'/resolved/'+value))}
 tree=ast.parse((ROOT/'__init__.py').read_text(encoding='utf-8'))
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in {'invalidate','invalidate_source','database_budget','database_budget_lines','database_parameters','database_complete'}],type_ignores=[]),'<database contract>','exec'),ns)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in {'invalidate','invalidate_source','update_game_root','database_budget','database_budget_lines','database_parameters','database_complete'}],type_ignores=[]),'<database contract>','exec'),ns)
 # Source files carry UTF-8 non-ASCII text; the Windows locale default (GBK)
 # cannot decode them, so pin the encoding instead of relying on the locale.
 tree=ast.parse((ROOT/'animation_panel.py').read_text(encoding='utf-8'))
@@ -92,6 +94,10 @@ class DatabaseUiContractTests(unittest.TestCase):
         self.assertEqual(calls,['game'])
     def test_build_requires_an_output_path(self):
         with self.assertRaises(RuntimeError):ns['database_parameters'](settings(''),'database-build',lambda p:p)
+    def test_game_root_selects_unified_database_path_without_checking_existence(self):
+        value=settings('')
+        ns['update_game_root'](value,None)
+        self.assertEqual(value.database,os.path.join('/resolved/game','ui-game.sredb'))
     def test_mismatch_fails_and_keeps_details_open(self):
         value=settings()
         with self.assertRaisesRegex(RuntimeError,'update or rebuild'):

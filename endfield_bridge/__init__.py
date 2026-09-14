@@ -7,6 +7,7 @@ bl_info = {
 import bpy
 from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringProperty, EnumProperty
+from os.path import join
 
 from .client import CoreError, request
 from .scene import apply_clip, create_scene, create_scene_steps, remove_scene
@@ -88,6 +89,15 @@ def invalidate_source(self, context):
     self.budget_database = ''
 
 
+def update_game_root(self, context):
+    root = self.game_root.strip()
+    default_database = join(bpy.path.abspath(root), 'ui-game.sredb') if root else ''
+    if self.database != default_database:
+        self.database = default_database
+    else:
+        invalidate_source(self, context)
+
+
 def database_budget(settings, result):
     values = tuple(result.get(key) for key in ('formatVersion', 'payloadBytes', 'maxPayloadBytes'))
     version, payload, maximum = values
@@ -119,7 +129,7 @@ class SORA_Settings(bpy.types.PropertyGroup):
         name="ENDF NPR-Shader post-processing", default=True, update=update_npr_post,
         description="Apply game tone mapping to the entire scene after its existing compositor, including viewport and final render; uses Standard color management and neutral exposure/gamma, and restores previous settings when disabled")
 
-    game_root: StringProperty(name="Game Folder", subtype="DIR_PATH", update=invalidate_source)
+    game_root: StringProperty(name="Game Folder", subtype="DIR_PATH", update=update_game_root)
     database: StringProperty(name="Sora Endfield Database", subtype="FILE_PATH", update=invalidate_source)
     payload_bytes: IntProperty(default=-1, min=-1, description="Validated JSON payload bytes, excluding the 52-byte file header")
     max_payload_bytes: IntProperty(default=0, min=0)
