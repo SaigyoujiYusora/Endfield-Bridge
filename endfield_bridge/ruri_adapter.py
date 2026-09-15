@@ -472,7 +472,20 @@ def finish_import(context, objects):
     register()
 
 
+def _ensure_render_interface_locked(scene):
+    """Render callbacks update shared NPR data: keep UI evaluation out of the job."""
+    if scene.render.use_lock_interface:
+        return False
+    if any(mat is not None and mat.get('ruri_uber_stack')
+           for obj in scene.objects if obj.type == 'MESH' and obj.data is not None
+           for mat in obj.data.materials):
+        scene.render.use_lock_interface = True
+        return True
+    return False
+
+
 def update_view(context):
+    _ensure_render_interface_locked(context.scene)
     view = None
     if context.screen:
         for area in context.screen.areas:
@@ -539,6 +552,8 @@ def restore(*_):
     from . import runtime_sync
     from .neutral_images import localize_material
     runtime_sync.reset()
+    for scene in bpy.data.scenes:
+        _ensure_render_interface_locked(scene)
     stacks()
     runtime.RIG_DRIVEN.clear()
     runtime.RIG_SCANNED[0] = False

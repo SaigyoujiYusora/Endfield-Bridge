@@ -48,7 +48,7 @@ def refresh_assembly(context, rig, owner):
                        asset=rig['sora_asset'])
     if not isinstance(assembly, dict) or not assembly.get('characterId') or 'slots' not in assembly:
         raise CoreError('原生装备装配重读失败')
-    owner[eq.CONTRACT] = json.dumps(assembly, separators=(',', ':'))
+    owner[eq.CONTRACT] = json.dumps(eq.compact(assembly), separators=(',', ':'))
     return assembly
 
 

@@ -1,5 +1,6 @@
 """Apply decoded body-clip equipment events to this owner's imported slots."""
 import json
+from types import SimpleNamespace
 import bpy
 from bpy.app.handlers import persistent
 from . import equipment as eq, tasks
@@ -402,8 +403,10 @@ def sync(scene):
             view_layer = next((layer for layer in scene.view_layers if rig.name in layer.objects), None)
             if view_layer is None: continue
             try:
-                with bpy.context.temp_override(scene=scene, view_layer=view_layer):
-                    apply(bpy.context, owner)
+                # Frame callbacks also run on the render job thread. Changing
+                # bpy.context here races the UI's reads of its Python context.
+                # The binding helpers only need these explicit scene inputs.
+                apply(SimpleNamespace(scene=scene, view_layer=view_layer), owner)
             except (ValueError, KeyError, TypeError, RuntimeError, OverflowError) as error:
                 for child in eq.owned_children(owner):
                     if BASE in child: restore(child)
@@ -419,6 +422,7 @@ def changed(scene, _depsgraph=None):
 
 @persistent
 def reloaded(_):
+    eq.compact_stored_contracts(bpy.data.collections)
     for scene in bpy.data.scenes: sync(scene)
 
 
@@ -447,6 +451,7 @@ def draw(layout, context, owner):
 
 
 def _resume():
+    eq.compact_stored_contracts(bpy.data.collections)
     for scene in bpy.data.scenes: defer_sync(scene)
     return None
 

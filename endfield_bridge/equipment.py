@@ -127,6 +127,33 @@ def compact(assembly):
     return {**assembly,'resources':[{k:v for k,v in resource.items() if k!='scene'} for resource in assembly['resources']]}
 
 
+def compact_stored_contracts(collections):
+    """Migrate legacy skill contracts that embedded complete resource scenes.
+
+    Those import payloads are already represented by Blender datablocks; event
+    handlers only need the same compact contract used by dedicated imports.
+    Keep all binding, controller, default-pose and event metadata intact.
+    """
+    changed = 0
+    for owner in collections:
+        raw = owner.get(CONTRACT)
+        if not isinstance(raw, str) or '"scene"' not in raw:
+            continue
+        try:
+            assembly = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(assembly, dict):
+            continue
+        resources = assembly.get('resources')
+        if (not isinstance(resources, list) or not all(isinstance(r, dict) for r in resources)
+                or not any('scene' in r for r in resources)):
+            continue
+        owner[CONTRACT] = json.dumps(compact(assembly), separators=(',', ':'))
+        changed += 1
+    return changed
+
+
 def apply_state(context,collection,state):
     if state not in {'idle','fight'}:raise ValueError('Unknown equipment state')
     assembly=json.loads(collection[CONTRACT])
