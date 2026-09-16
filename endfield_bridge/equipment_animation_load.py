@@ -154,7 +154,7 @@ def body_clip(result):
     return clip
 
 
-def apply_steps(context, rig, owner, targets, results, keep_face_controls):
+def apply_steps(context, rig, owner, targets, results, keep_face_controls, *, timeline=None):
     clip = body_clip(results['body'])
     bones = results['body']['bones']
     for target in targets:
@@ -167,10 +167,15 @@ def apply_steps(context, rig, owner, targets, results, keep_face_controls):
     timing = manual.timeline_state(context)
     old_face_mask = animation._face_mask(rig)
     completed = []
+    from .animation_queue import owned_track
+    rigs = [rig] + [eq.owner_rig(child) for child in eq.owned_children(owner, 'dedicated')]
+    queue_tracks = [(track, track.mute) for obj in rigs if obj and obj.animation_data
+                    for track in obj.animation_data.nla_tracks if owned_track(track, obj)]
     try:
+        for track, _ in queue_tracks: track.mute = True
         saved = manual.capture(rig)
         body_action = yield from animation.apply_clip_steps(context, rig, clip, [bone['name'] for bone in bones],
-            bone_sources=bones, keep_face_controls=keep_face_controls)
+            bone_sources=bones, keep_face_controls=keep_face_controls, timeline=timeline)
         completed.append((rig, saved, body_action, None))
         mapping = json.loads(body_action.get('sora_timeline_mapping', '{}'))
         timeline = {'fps': mapping.get('actionFps', context.scene.render.fps / context.scene.render.fps_base),
@@ -196,6 +201,7 @@ def apply_steps(context, rig, owner, targets, results, keep_face_controls):
         equipment_events.defer_sync(context.scene)
         return body_action
     except BaseException:
+        for track, mute in queue_tracks: track.mute = mute
         animation._restore_face_mask(old_face_mask)
         rollback_completed(completed)
         scene = context.scene

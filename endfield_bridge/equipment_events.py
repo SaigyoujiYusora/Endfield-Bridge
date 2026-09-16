@@ -80,7 +80,7 @@ def restore(child, clear=False):
             if key in child: del child[key]
 
 
-def bound_clip(owner):
+def bound_clip(owner, scene=None):
     """Stable identity of the body clip bound to this owner, None when nothing is bound.
 
     The identity is the clip's own persisted owner UUID. A datablock pointer does not survive save/reopen,
@@ -92,6 +92,9 @@ def bound_clip(owner):
     rig = eq.owner_rig(owner)
     animation = rig.animation_data if rig is not None else None
     action = animation.action if animation is not None else None
+    if scene is not None:
+        from .animation_queue import playback
+        action, _ = playback(rig, scene.frame_current_final)
     identity = action.get('sora_animation_owner') if action is not None else None
     return str(identity) if identity else None
 
@@ -186,13 +189,12 @@ def pause(owner, restore_baseline=True, keep_enabled=False):
 def body_events(scene, owner, assembly):
     rig = eq.owner_rig(owner)
     animation = rig.animation_data if rig else None
-    action = animation.action if animation else None
+    from .animation_queue import playback
+    action, action_frame = playback(rig, scene.frame_current_final)
     if action is None or rig.get('sora_pose_resume'):
         return None, '身体动作未绑定或已挂起；恢复静态基线', 0
     if action.get('sora_instance') != rig.get('sora_instance'):
         return None, '身体动作不属于当前实例；恢复静态基线', 0
-    if any(not track.mute for track in animation.nla_tracks):
-        return None, '身体 NLA 混合时间尚不支持事件跟随；恢复静态基线', 0
     metadata = json.loads(action.get('sora_clip_metadata', '{}'))
     source = (metadata.get('native') or {}).get('source') or {}
     identity = str(source.get('cab', '')) + ':' + str(source.get('pathId', ''))
@@ -208,7 +210,7 @@ def body_events(scene, owner, assembly):
     origin = timeline.get('frameOrigin', 1)
     if not fps or fps <= 0:
         return None, '身体源动作缺少时间轴映射', 0
-    seconds = (scene.frame_current_final - origin) / fps
+    seconds = (action_frame - origin) / fps
     authored = matches[0]['decodedWeaponEvents']
     events = [event for event in authored if event['time'] <= seconds]
     return sorted(events, key=lambda event: (event['time'], event['sourceIndex'])), '', len(authored)
@@ -245,7 +247,8 @@ def skill_visibility(scene, owner):
     SetActive(true)); a hidden request only removes the model from view. The mount dimension is never
     invented for a weapon that is not imported."""
     rig = eq.owner_rig(owner)
-    action = rig.animation_data.action if rig and rig.animation_data else None
+    from .animation_queue import playback
+    action, action_frame = playback(rig, scene.frame_current_final)
     rows = json.loads(action.get('sora_skill_visibility', '[]')) if action else []
     if not rows:
         return None
@@ -256,7 +259,7 @@ def skill_visibility(scene, owner):
         return None
     assembly = json.loads(owner.get(eq.CONTRACT, '{}')) or {}
     mapping = skill_slot_map(owner, assembly)
-    seconds = (scene.frame_current_final - origin) / fps
+    seconds = (action_frame - origin) / fps
     columns = {}
     for index, row in enumerate(rows):
         visibility = row['visibility']
@@ -297,7 +300,7 @@ def apply(context, owner):
             if APPLIED in child: restore(child)
         status(owner, message)
         return
-    clip = bound_clip(owner)
+    clip = bound_clip(owner, context.scene)
     carried = skill is None and bool(authored)
     planned = {}
     for key, child in children.items():

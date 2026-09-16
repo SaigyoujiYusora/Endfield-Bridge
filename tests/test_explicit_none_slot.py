@@ -75,7 +75,7 @@ class CallerTests(unittest.TestCase):
         wrapper.body[0].handlers[0].body=handler.body
         env={'rig':self.rig,'animation':self.rig.animation_data,'previous_action':self.action,'previous_slot':None,
              'bind_action':self.bind,'bpy':self.bpy,'action':candidate,'timeline':{},'pose_state':[],
-             'property_state':{},'registry_state':None,'old_face_mask':None,'previous_override':None,
+             'property_state':{},'registry_state':None,'old_face_mask':None,'previous_override':None,'queue_tracks':[],
              '_restore_face_mask':lambda *a:None,'_restore_properties':lambda *a:None}
         with self.assertRaisesRegex(RuntimeError,'injected clip failure'):
             exec(compile(wrapper,'<production clip rollback>','exec'),env)

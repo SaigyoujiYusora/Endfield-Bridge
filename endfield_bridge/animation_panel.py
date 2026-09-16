@@ -54,10 +54,18 @@ def invalidate_results(settings, context=None):
     settings.clip_resource='';settings.clip_root=''
 
 
+def select_skill(settings, context=None):
+    if 0 <= settings.selected_skill < len(settings.skills):
+        settings.skill = settings.skills[settings.selected_skill].resource_path
+
+
 class SORA_AnimationSettings(bpy.types.PropertyGroup):
     game_root: StringProperty(name='Game Folder', subtype='DIR_PATH')
     query: StringProperty(name='Find animation',update=invalidate_results)
     skill: StringProperty(name='Skill resource')
+    skill_query: StringProperty(name='技能名称筛选')
+    skills: CollectionProperty(type=SORA_AnimationRow)
+    selected_skill: IntProperty(default=-1, update=select_skill)
     category: EnumProperty(name='Category',items=[(v,v.title(),'') for v in ('all','idle','move','attack','skill','interaction','unclassified')],update=invalidate_results)
     offset: IntProperty(default=0,min=0)
     total: IntProperty(default=0)
@@ -228,6 +236,32 @@ class SORA_OT_animation_face(bpy.types.Operator):
             return {'CANCELLED'}
 
 
+class SORA_OT_skill_search(TaskOperator, bpy.types.Operator):
+    bl_idname = 'sora.skill_search'
+    bl_label = '读取当前角色技能列表'
+
+    def execute(self, context):
+        settings = context.scene.sora_animation
+        rig = target(context)
+        try:
+            if rig is None: raise ValueError('请选择已导入的角色')
+            root = bpy.path.abspath(context.scene.sora.game_root)
+            query = settings.skill_query
+            def complete(rows):
+                if target(context) != rig or root != bpy.path.abspath(context.scene.sora.game_root) or query != settings.skill_query:
+                    raise ValueError('角色或筛选已改变，请重新读取技能')
+                settings.skills.clear()
+                for source in rows:
+                    row = settings.skills.add()
+                    row.name, row.resource_path = source['name'], source['resource']
+                settings.selected_skill = 0 if rows else -1
+                set_status(context, settings, f'{len(rows)} 个游戏内技能资源；选择后加载，无需另找 JSON 文件')
+            return tasks.start(self, context, 'skill-search',
+                dict(root=root, path=rig['sora_database'], asset=rig['sora_asset'], query=query), complete)
+        except Exception as error:
+            self.report({'ERROR'}, str(error)); return {'CANCELLED'}
+
+
 class SORA_OT_animation_skill(TaskOperator, bpy.types.Operator):
     bl_idname = 'sora.animation_skill'
     bl_label = 'Load skill animation (body + native slots)'
@@ -294,7 +328,13 @@ def draw(layout, context):
         layout.template_list('UI_UL_list', 'native_animation_clips', settings, 'clips', settings, 'selected_clip', rows=3)
     layout.prop(settings, 'keep_face_controls')
     layout.operator('sora.animation_import')
+    from . import animation_queue
+    animation_queue.draw(layout, context)
     column = layout.column(align=True)
+    column.label(text='技能动作 · 身体与装备')
+    column.prop(settings, 'skill_query')
+    column.operator('sora.skill_search')
+    column.template_list('UI_UL_list', 'native_skills', settings, 'skills', settings, 'selected_skill', rows=4)
     column.prop(settings, 'skill')
     column.operator('sora.animation_skill')
     rig = target(context)
@@ -311,16 +351,20 @@ def draw(layout, context):
 
 
 CLASSES = (SORA_AnimationRow, SORA_AnimationClipRow, SORA_AnimationSettings, SORA_OT_animation_search,
-           SORA_OT_animation_clips, SORA_OT_animation_import, SORA_OT_animation_face, SORA_OT_animation_skill)
+           SORA_OT_animation_clips, SORA_OT_animation_import, SORA_OT_animation_face, SORA_OT_skill_search, SORA_OT_animation_skill)
 
 
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.sora_animation = PointerProperty(type=SORA_AnimationSettings)
+    from . import animation_queue
+    animation_queue.register()
 
 
 def unregister():
+    from . import animation_queue
+    animation_queue.unregister()
     del bpy.types.Scene.sora_animation
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

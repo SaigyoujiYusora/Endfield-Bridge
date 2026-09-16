@@ -112,6 +112,11 @@ def requests(context, rig, skill):
         if child_rig is None:
             raise ValueError('原生装备控制器没有已导入的骨架：' + slot['slotId'])
         for index, window in enumerate(slot['windows']):
+            # This entry previews the resolved body clip once. Floating skills also author later
+            # repeat/branch windows beyond that clip; baking those over this interval would overwrite
+            # the first window with a motionless Action (or fail the entered-state proof).
+            if window['enterTime'] >= body_length - 1e-5:
+                continue
             if not window.get('triggerName') or window.get('endTriggerName') is None:
                 raise ValueError('技能窗口缺少原生进入/结束触发：' + slot['slotId'])
             key = 'skill:%s:%s' % (slot['slotId'], index)
@@ -364,7 +369,11 @@ def apply_steps(context, rig, owner, targets, results, plan, keep_face_controls)
     rigs = affected_rigs(owner, rig, targets)
     transaction = uuid.uuid4().hex
     snapshot = capture_state(context, owner, rigs)
+    from .animation_queue import owned_track
+    queue_tracks = [(track, track.mute) for obj in rigs if obj.animation_data
+                    for track in obj.animation_data.nla_tracks if owned_track(track, obj)]
     try:
+        for track, _ in queue_tracks: track.mute = True
         body_action = yield from animation.apply_clip_steps(context, rig, clip, [bone['name'] for bone in bones],
             bone_sources=bones, keep_face_controls=keep_face_controls, transaction=transaction)
         # Ownership is recorded at creation time: even a failure before sora_skill/sora_skill_window metadata
@@ -401,6 +410,7 @@ def apply_steps(context, rig, owner, targets, results, plan, keep_face_controls)
         body_action['sora_skill_released_actions'] = json.dumps(released, separators=(',', ':'))
         return body_action, applied, released
     except BaseException:
+        for track, mute in queue_tracks: track.mute = mute
         animation._restore_face_mask(old_face_mask)
         restore_state(snapshot)
         reclaim_transaction(transaction)

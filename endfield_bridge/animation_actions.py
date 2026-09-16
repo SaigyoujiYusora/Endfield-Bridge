@@ -432,6 +432,8 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
     property_state = {prop: (prop in rig, rig.get(prop)) for prop in scalar_properties}
     registry_state = rig.get('sora_anim_scalar_map')
     previous_override = _properties(rig, ('sora_face_override_action',))
+    from .animation_queue import owned_track
+    queue_tracks = [(track, track.mute) for track in animation.nla_tracks if owned_track(track, rig)] if animation else []
     action = bpy.data.actions.new(clip['name'])
     # Transaction ownership is recorded the moment the datablock exists, so a failure later in this same
     # import still identifies this action as this transaction's own data even if it is never bound.
@@ -508,6 +510,8 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
                     if (path, axis) not in existing_drivers:
                         getattr(bone, attribute)[axis] = value
         rig.animation_data_create()
+        for track, _ in queue_tracks:
+            track.mute = True
         bind_action(rig,action,created_slot_identity,select_slot=True)
         _release_face_mask(old_face_mask)
         _associate_face(rig, action, bool(rig.get(face.ENABLED)))
@@ -541,6 +545,8 @@ def apply_clip_steps(context, rig, clip, bone_names, bone_sources=None, keep_fac
         return action
     except BaseException:
         # Restore the previous mask before evaluating its Action again.
+        for track, mute in queue_tracks:
+            track.mute = mute
         _restore_face_mask(old_face_mask)
         _restore_properties(rig, previous_override)
         if animation is not None:
