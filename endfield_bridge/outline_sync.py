@@ -31,6 +31,9 @@ def sync_outline_view(stack, view=None, camera=None, objects=None, rebuild=True)
     scene = bpy.context.scene
     pool = [o for o in (objects if objects is not None else scene.objects)
             if o.type == 'MESH' and o.data is not None and o.get('sora_render_mode') != 'BASIC']
+    if camera is None and not bpy.app.background:
+        from .outline_viewport import handles
+        pool = [obj for obj in pool if not handles(obj)]
     stale = []
     if rebuild:
         for obj in pool:

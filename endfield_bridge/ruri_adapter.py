@@ -486,6 +486,8 @@ def _ensure_render_interface_locked(scene):
 
 def update_view(context):
     _ensure_render_interface_locked(context.scene)
+    from . import outline_viewport
+    outline_viewport.sync(stacks(), context.scene)
     view = None
     if context.screen:
         for area in context.screen.areas:
@@ -602,6 +604,8 @@ def register():
 
 
 def unregister():
+    from . import outline_viewport
+    outline_viewport.unregister()
     for stack in _STACKS or ():
         parameter_upload.cancel(stack)
     if restore in bpy.app.handlers.load_post:
