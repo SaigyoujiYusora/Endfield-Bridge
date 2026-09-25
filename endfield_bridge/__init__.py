@@ -673,6 +673,20 @@ def _migrate_sources_timer():
     return None
 
 
+def _background_preview_guard():
+    """Blender 5.1.2 cannot write file previews reliably without a GUI.
+
+    Keep automatic .blend previews for the visible user session, while preventing background
+    validation/import processes from creating malformed relative ``.thumbnails`` directories.
+    This is process-local and deliberately does not overwrite the user's saved visible-session preference.
+    """
+    if bpy.app.background:
+        try:
+            bpy.context.preferences.filepaths.file_preview_type = 'NONE'
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+
 def register():
     from . import post, ruri_adapter, material_panel, material_browser, face_controls, animation_panel, pose_controls, equipment, generic_weapons, equipment_animation
     from .registration import RegistrationTransaction
@@ -683,6 +697,7 @@ def register():
         (bpy.types.Collection, 'sora_material_browser'),
         (bpy.types.WindowManager, 'endf_npr_search')))
     try:
+        _background_preview_guard()
         ruri_adapter.register()
         for cls in CLASSES:
             bpy.utils.register_class(cls)

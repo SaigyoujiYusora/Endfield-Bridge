@@ -52,7 +52,7 @@ def refresh_assembly(context, rig, owner):
     return assembly
 
 
-def resolve(context, rig, skill):
+def resolve(context, rig, skill, *, selection=None, refresh=True):
     addon = context.preferences.addons.get(__package__)
     if addon is None:
         raise CoreError('Endfield-Bridge preferences are unavailable')
@@ -62,7 +62,8 @@ def resolve(context, rig, skill):
     initial = eq.owner_collection(context)
     if initial is None or eq.CONTRACT not in initial:
         raise ValueError('实例缺少原生装备装配信息，请先导入角色')
-    refresh_assembly(context, rig, initial)
+    if refresh:
+        refresh_assembly(context, rig, initial)
     owner, rows = sources(context)
     assembly = json.loads(owner[eq.CONTRACT])
     resource = rows[0]['resource'] if rows else next((row['resourcePath'] for row in assembly.get('resources', [])
@@ -77,6 +78,8 @@ def resolve(context, rig, skill):
     if plan.get('complete') is not True:
         raise CoreError('技能时间轴未完整消费：' + str(plan.get('incompleteReason')))
     body = [row for row in (plan.get('bodyClips') or {}).get('resolved') or [] if row.get('status') == 'resolved']
+    if selection:
+        body = [row for row in body if row['cab'] == selection['cab'] and str(row['pathId']) == str(selection['pathId'])]
     if len(body) != 1:
         raise ValueError('技能没有唯一已校验的身体片段来源（montage→manifest→clip）')
     plan = dict(plan)
@@ -85,8 +88,8 @@ def resolve(context, rig, skill):
     return owner, rows, plan, body[0]
 
 
-def requests(context, rig, skill):
-    owner, rows, plan, body = resolve(context, rig, skill)
+def requests(context, rig, skill, *, selection=None, refresh=True):
+    owner, rows, plan, body = resolve(context, rig, skill, selection=selection, refresh=refresh)
     parameters = {'root': bpy.path.abspath(context.scene.sora.game_root), 'path': rig['sora_database'],
                   'asset': rig['sora_asset'], 'resource': clip_resource(body['resourcePath']),
                   'selection': {'cab': body['cab'], 'pathId': body['pathId']}}
@@ -174,6 +177,8 @@ def capture_state(context, owner, rigs):
     state = {'owner': owner.name, 'enabled': bool(owner.get(equipment_events.ENABLED)),
              'rigs': [[rig.name, manual.capture(rig)] for rig in rigs],
              'collections': [], 'roots': []}
+    state['preview'] = {key: owner.get(key) for key in
+        ('sora_projectile_visibility_restore', 'sora_projectile_visibility_action') if key in owner}
     for collection in eq.owned_children(owner):
         state['collections'].append({'name': collection.name,
                                      'hide': [collection.hide_viewport, collection.hide_render],
@@ -187,7 +192,9 @@ def capture_state(context, owner, rigs):
                                'parent_bone': root.parent_bone,
                                'inverse': root.matrix_parent_inverse.copy(),
                                'basis': root.matrix_basis.copy(),
-                               'policy': root.get('sora_attachment_policy')})
+                               'policy': root.get('sora_attachment_policy'),
+                               'preview': {key: root.get(key) for key in
+                                   ('sora_projectile_mount_restore', 'sora_projectile_hand_alignment') if key in root}})
     return state
 
 
@@ -231,6 +238,9 @@ def restore_state(state):
         root.parent_bone = row['parent_bone']
         root.matrix_parent_inverse = row['inverse'].copy()
         root.matrix_basis = row['basis'].copy()
+        for key in ('sora_projectile_mount_restore', 'sora_projectile_hand_alignment'):
+            if key in row.get('preview', {}): root[key] = row['preview'][key]
+            elif key in root: del root[key]
         if row['policy'] is None:
             if 'sora_attachment_policy' in root:
                 del root['sora_attachment_policy']
@@ -239,6 +249,9 @@ def restore_state(state):
     owner = bpy.data.collections.get(state['owner'])
     if owner is not None:
         owner[equipment_events.ENABLED] = state['enabled']
+        for key in ('sora_projectile_visibility_restore', 'sora_projectile_visibility_action'):
+            if key in state.get('preview', {}): owner[key] = state['preview'][key]
+            elif key in owner: del owner[key]
     bpy.context.view_layer.update()
 
 
@@ -340,7 +353,7 @@ def apply_visibility(context, owner, targets, plan, fps, origin):
     return applied
 
 
-def apply_steps(context, rig, owner, targets, results, plan, keep_face_controls):
+def apply_steps(context, rig, owner, targets, results, plan, keep_face_controls, *, timeline=None, preview=True):
     from . import animation_actions as animation
     from . import equipment_animation as manual
     from . import equipment_events
@@ -373,9 +386,15 @@ def apply_steps(context, rig, owner, targets, results, plan, keep_face_controls)
     queue_tracks = [(track, track.mute) for obj in rigs if obj.animation_data
                     for track in obj.animation_data.nla_tracks if owned_track(track, obj)]
     try:
+        from . import projectile_preview, projectile_mount
+        projectile_preview.restore_visibility(owner)
+        projectile_mount.restore(owner)
+        for child in eq.owned_children(owner):
+            if equipment_events.APPLIED in child:
+                del child[equipment_events.APPLIED]
         for track, _ in queue_tracks: track.mute = True
         body_action = yield from animation.apply_clip_steps(context, rig, clip, [bone['name'] for bone in bones],
-            bone_sources=bones, keep_face_controls=keep_face_controls, transaction=transaction)
+            bone_sources=bones, keep_face_controls=keep_face_controls, transaction=transaction, timeline=timeline)
         # Ownership is recorded at creation time: even a failure before sora_skill/sora_skill_window metadata
         # still identifies this transaction's own data for cleanup.
         body_action['sora_skill_transaction'] = transaction
@@ -405,9 +424,18 @@ def apply_steps(context, rig, owner, targets, results, plan, keep_face_controls)
         body_action['sora_skill'] = json.dumps(plan['plan'].get('timeline') or {}, separators=(',', ':'))
         body_action['sora_skill_windows'] = json.dumps([target['window'] for target in targets], separators=(',', ':'))
         body_action['sora_skill_visibility'] = json.dumps(plan['plan'].get('weaponVisibility') or [], separators=(',', ':'))
+        assembly = json.loads(owner[eq.CONTRACT])
+        body_action['sora_skill_static_defaults'] = json.dumps({s['slotId']: bool(s['showWhenFight'])
+            for s in assembly['declaration']['dedicatedEquipment']})
         applied = apply_visibility(context, owner, targets, plan, fps, origin)
         body_action['sora_skill_visibility_applied'] = json.dumps(applied, separators=(',', ':'))
         body_action['sora_skill_released_actions'] = json.dumps(released, separators=(',', ':'))
+        if preview and getattr(context.scene.sora_animation, 'projectile_preview', False):
+            from . import projectile_preview
+            created = projectile_preview.build(context, owner, rig, body_action, plan['plan'])
+            projectile_preview.commit(owner, created)
+            if created:
+                body_action['sora_projectile_mesh_count'] = len(created)
         return body_action, applied, released
     except BaseException:
         for track, mute in queue_tracks: track.mute = mute
@@ -418,3 +446,11 @@ def apply_steps(context, rig, owner, targets, results, plan, keep_face_controls)
         scene.render.fps, scene.render.fps_base, scene.frame_start, scene.frame_end = timing[:4]
         scene.frame_set(timing[4], subframe=timing[5])
         raise
+
+
+def clip_skill_index(context, rig):
+    """Per-operation native identity lookup; no guessed resource-name substitution."""
+    addon = context.preferences.addons[__package__]
+    rows = request(bpy.path.abspath(addon.preferences.executable), 'skill-clip-index',
+        root=bpy.path.abspath(context.scene.sora.game_root), path=rig['sora_database'], asset=rig['sora_asset'])
+    return {(r['cab'], str(r['pathId'])): r['skills'] for r in rows}

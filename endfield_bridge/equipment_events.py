@@ -303,6 +303,9 @@ def apply(context, owner):
     clip = bound_clip(owner, context.scene)
     carried = skill is None and bool(authored)
     planned = {}
+    from .animation_queue import playback
+    current_action, _ = playback(eq.owner_rig(owner), context.scene.frame_current_final)
+    defaults = json.loads(current_action.get('sora_skill_static_defaults', '{}')) if current_action else {}
     for key, child in children.items():
         baseline = capture(child)
         if clip_entry(child, clip, carried):
@@ -312,7 +315,8 @@ def apply(context, owner):
         # Without a live skill window the slot keeps its captured baseline; a live window either appears on
         # the authored fight node or is hidden without touching the mount.
         planned[key] = {'mount': 'baseline' if skill is not None else None,
-                        'viewport': baseline['viewport'], 'render': baseline['render']}
+                        'viewport': not defaults[key[1]] if key[1] in defaults else baseline['viewport'],
+                        'render': not defaults[key[1]] if key[1] in defaults else baseline['render']}
     unsupported = set()
     for event in events:
         key = event['targetRole'], event.get('slotId')
@@ -414,6 +418,12 @@ def sync(scene):
                 for child in eq.owned_children(owner):
                     if BASE in child: restore(child)
                 status(owner, '身体事件未应用：' + str(error))
+        # Skill preview is the final layer over native equipment events, regardless of
+        # handler registration order or whether loading finishes without a frame change.
+        import sys
+        preview = sys.modules.get(__package__ + '.projectile_preview')
+        if preview is not None:
+            preview.sync(scene)
     finally:
         _busy = False
 

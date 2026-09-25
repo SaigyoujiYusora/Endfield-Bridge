@@ -51,6 +51,8 @@ def playback(rig, frame):
     if len(tracks) != 1 or not owned_track(tracks[0], rig):
         return None, frame
     strips = list(tracks[0].strips)
+    if strips and frame < strips[0].frame_start and strips[0].extrapolation == 'HOLD':
+        frame = strips[0].frame_start
     for index, strip in enumerate(strips):
         if strip.mute or strip.blend_type != 'REPLACE' or strip.use_animated_time or strip.use_animated_influence:
             continue
@@ -137,9 +139,15 @@ def apply_steps(context, rig, owner, entries, results, start, keep_face):
     created, tracks, masks = [], [], []
     sequence = uuid.uuid4().hex
     end = float(start)
+    preview_objects = []
     try:
         for _, track, _ in track_states: track.mute = True
-        equipment_events.pause(owner)
+        from . import projectile_preview, projectile_mount
+        projectile_preview.restore_visibility(owner)
+        projectile_mount.restore(owner)
+        # Preserve the resolved current state as the queue entry baseline. Restoring an
+        # old manual baseline here can resurrect an alternate bow from a previous skill.
+        equipment_events.pause(owner, restore_baseline=False)
         scheduled = []
         for index, entry in enumerate(entries):
             result = {key: results[prefix] for key, prefix in entry['keys'].items()}
@@ -147,8 +155,21 @@ def apply_steps(context, rig, owner, entries, results, start, keep_face):
             if not math.isfinite(duration) or duration <= 0 or end+duration > 1048574:
                 raise ValueError('动画队列时长超出时间线范围')
             yield {'stage': f'创建队列片段 {index+1}/{len(entries)}', 'detail': result['body']['clip']['name']}
-            body = yield from loader.apply_steps(context, rig, owner, entry['targets'], result, keep_face,
-                                                 timeline={'fps': fps, 'origin': 1})
+            if entry.get('skill'):
+                body, _, _ = yield from skill_animation.apply_steps(context, rig, owner, entry['targets'], result,
+                    entry['skill'], keep_face, timeline={'fps': fps, 'origin': 1}, preview=False)
+            else:
+                body = yield from loader.apply_steps(context, rig, owner, entry['targets'], result, keep_face,
+                                                     timeline={'fps': fps, 'origin': 1})
+                if any(e.get('skill') for e in entries):
+                    # A transition clip with no fully decoded SkillData still needs a
+                    # deterministic equipment baseline, not the preceding skill's masks.
+                    assembly = json.loads(owner[eq.CONTRACT])
+                    slots = assembly['declaration']['dedicatedEquipment']
+                    body['sora_projectile_preview'] = True
+                    body['sora_projectile_scope'] = 'body-only native fight baseline; no resolved SkillData'
+                    body['sora_projectile_hidden_slots'] = json.dumps([s['slotId'] for s in slots if not s['showWhenFight']])
+                    body['sora_projectile_mount_weapons'] = json.dumps([s['weaponIndex'] for s in slots if s['showWhenFight']])
             pairs = [(rig, body)] + [(t['rig'], t['rig'].animation_data.action) for t in entry['targets']]
             for obj, action in pairs:
                 created.append(action)
@@ -178,7 +199,8 @@ def apply_steps(context, rig, owner, entries, results, start, keep_face):
             strip.action_frame_end = 1+duration
             strip.frame_start = frame
             strip.frame_end = frame+duration
-            strip.blend_type = 'REPLACE'; strip.extrapolation = 'NOTHING'
+            strip.blend_type = 'REPLACE'
+            strip.extrapolation = 'HOLD' if index == 0 else 'NOTHING'
             strip.use_auto_blend = False; strip.blend_in = 0; strip.blend_out = 0
             strip.influence = 1
             obj.update_tag(refresh={'OBJECT', 'DATA', 'TIME'})
@@ -187,12 +209,22 @@ def apply_steps(context, rig, owner, entries, results, start, keep_face):
         # NLA intervals are half-open. Do not leave a blank A-pose frame (or the previous longer
         # playback range) after the last strip when looping the newly imported sequence.
         scene.frame_end = max(start, math.ceil(end-1e-6)-1)
-        owner[equipment_events.ENABLED] = saved['enabled']
+        owner[equipment_events.ENABLED] = saved['enabled'] or any(entry.get('skill') for entry in entries)
+        if getattr(scene.sora_animation, 'projectile_preview', False):
+            from . import projectile_preview
+            for obj, action, frame, duration, index in scheduled:
+                if obj == rig and entries[index].get('skill'):
+                    preview_objects.extend(projectile_preview.build(context, owner, rig, action,
+                        entries[index]['skill']['plan'], scene_origin=frame))
+            projectile_preview.commit(owner, preview_objects)
         context.view_layer.update()
         scene.frame_set(start)
         equipment_events.defer_sync(scene)
         return end
     except BaseException:
+        if preview_objects:
+            from . import projectile_preview
+            projectile_preview.remove_objects(preview_objects)
         for obj, track in reversed(tracks): obj.animation_data.nla_tracks.remove(track)
         skill_animation.restore_state(saved)
         for _, track, mute in track_states: track.mute = mute
@@ -221,16 +253,27 @@ class SORA_OT_queue_load(TaskOperator, bpy.types.Operator):
             initial = signature(settings)
             entries, jobs = [], []
             owner = eq.owner_collection(context)
+            from . import skill_animation
+            skill_index = skill_animation.clip_skill_index(context, rig)
             for index, row in enumerate(settings.items):
-                requests, current_owner, targets = loader.requests(context, rig, {
-                    'root': settings.root, 'path': settings.database, 'asset': settings.asset,
-                    'resource': row.resource, 'selection': {'cab': row.cab, 'pathId': row.path_id}})
+                selection = {'cab': row.cab, 'pathId': row.path_id}
+                skills = skill_index.get((row.cab, row.path_id), [])
+                if len(skills) > 1:
+                    raise ValueError('队列片段对应多个原生技能，请单独选择技能加载：' + row.name)
+                plan = None
+                if skills:
+                    current_owner, requests, targets, plan = skill_animation.requests(context, rig, skills[0],
+                        selection=selection, refresh=False)
+                else:
+                    requests, current_owner, targets = loader.requests(context, rig, {
+                        'root': settings.root, 'path': settings.database, 'asset': settings.asset,
+                        'resource': row.resource, 'selection': {'cab': row.cab, 'pathId': row.path_id}})
                 if current_owner != owner: raise ValueError('队列实例已改变')
                 keys = {}
                 for job in requests:
                     key = f'{index}:{job["key"]}'; keys[job['key']] = key
                     jobs.append(dict(job, key=key))
-                entries.append({'targets': targets, 'keys': keys})
+                entries.append({'targets': targets, 'keys': keys, 'skill': plan})
             def complete(results):
                 if target(context) != rig or signature(settings) != initial or identity(context, rig) != initial[:4]:
                     raise ValueError('队列或角色来源已改变；请重新加载')

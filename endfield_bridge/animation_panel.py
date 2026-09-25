@@ -63,6 +63,8 @@ class SORA_AnimationSettings(bpy.types.PropertyGroup):
     game_root: StringProperty(name='Game Folder', subtype='DIR_PATH')
     query: StringProperty(name='Find animation',update=invalidate_results)
     skill: StringProperty(name='Skill resource')
+    projectile_preview: BoolProperty(name='无目标弹体预览', default=True,
+        description='使用原生发射时间、挂点、箭网格和速度；材质简化，不模拟战斗分支、碰撞和粒子拖尾')
     skill_query: StringProperty(name='技能名称筛选')
     skills: CollectionProperty(type=SORA_AnimationRow)
     selected_skill: IntProperty(default=-1, update=select_skill)
@@ -199,12 +201,25 @@ class SORA_OT_animation_import(TaskOperator, bpy.types.Operator):
                           path=rig['sora_database'], asset=rig['sora_asset'], resource=row.resource_path,
                           selection={'cab': selected.cab, 'pathId': selected.path_id})
             from . import equipment_animation_load
-            jobs, owner, equipment_targets = equipment_animation_load.requests(context, rig, parameters)
+            from . import skill_animation
+            plan = None
+            skills = skill_animation.clip_skill_index(context, rig).get((selected.cab, selected.path_id), [])
+            if len(skills) == 1:
+                owner, jobs, equipment_targets, plan = skill_animation.requests(context, rig, skills[0],
+                    selection=parameters['selection'], refresh=False)
+            else:
+                jobs, owner, equipment_targets = equipment_animation_load.requests(context, rig, parameters)
             def complete(result):
                 if target(context)!=rig:raise ValueError('Animation target changed before binding')
-                action = yield from equipment_animation_load.apply_steps(context, rig, owner, equipment_targets,
-                    result, settings.keep_face_controls)
+                if plan:
+                    action, _, _ = yield from skill_animation.apply_steps(context, rig, owner, equipment_targets,
+                        result, plan, settings.keep_face_controls)
+                else:
+                    action = yield from equipment_animation_load.apply_steps(context, rig, owner, equipment_targets,
+                        result, settings.keep_face_controls)
                 message = 'Loaded ' + result['body']['clip']['name']
+                if plan: message += '; matched native skill with equipment and projectile timeline'
+                elif len(skills) > 1: message += '; multiple skills reference this clip: load a specific skill for projectile playback'
                 if equipment_targets: message += f'; {len(equipment_targets)} native equipment timelines loaded'
                 if action.get('sora_face_mode') == 'MANUAL': message += '; manual Face controls override retained face keys'
                 unbound=(result['body']['clip'].get('native') or {}).get('unboundTransformTracks') or []
@@ -291,6 +306,8 @@ class SORA_OT_animation_skill(TaskOperator, bpy.types.Operator):
                 action, applied, released = yield from skill_animation.apply_steps(context, rig, owner, targets,
                     result, plan, settings.keep_face_controls)
                 message = 'Loaded skill ' + result['body']['clip']['name']
+                if action.get('sora_projectile_count'):
+                    message += f"; {action['sora_projectile_count']} 支无目标弹体预览（复用箭矢材质）"
                 if targets: message += f'; {len(targets)} native skill windows loaded'
                 elif plan.get('equipmentScope') == 'body-only-no-native-equipment-animator':
                     message += '; body animation only; native equipment Animator is not declared'
@@ -336,6 +353,7 @@ def draw(layout, context):
     column.operator('sora.skill_search')
     column.template_list('UI_UL_list', 'native_skills', settings, 'skills', settings, 'selected_skill', rows=4)
     column.prop(settings, 'skill')
+    column.prop(settings, 'projectile_preview')
     column.operator('sora.animation_skill')
     rig = target(context)
     action = rig.animation_data.action if rig and rig.animation_data else None
@@ -360,9 +378,13 @@ def register():
     bpy.types.Scene.sora_animation = PointerProperty(type=SORA_AnimationSettings)
     from . import animation_queue
     animation_queue.register()
+    from . import projectile_preview
+    projectile_preview.register()
 
 
 def unregister():
+    from . import projectile_preview
+    projectile_preview.unregister()
     from . import animation_queue
     animation_queue.unregister()
     del bpy.types.Scene.sora_animation
